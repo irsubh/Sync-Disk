@@ -1,0 +1,32 @@
+# Executable & Local Build Scripts
+scripts/
+*.sh
+*.py
+github.py
+__pycache__/
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Swift Package Manager & Build Artefacts
+.build/
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# User & Local Environment
+*.swp
+*~
+.idea/
+.vscode/
+
+# Temporary & Log Files
+scratch/
+*.log
