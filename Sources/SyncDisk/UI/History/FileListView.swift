@@ -143,36 +143,21 @@ private struct FolderRowView: View {
             
             Spacer(minLength: 6)
             
-            // Status / Version Capsules
-            HStack(spacing: 4) {
-                if folder.isDeleted {
-                    Text("Deleted")
-                        .font(.system(size: 9, weight: .semibold))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundColor(.red.opacity(0.9))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
-                        .background(
-                            Capsule()
-                                .fill(Color.red.opacity(0.12))
-                        )
-                }
-                if folder.versionCount > 0 {
-                    Text("v\(folder.versionCount)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundColor(isSelected ? .primary : .secondary.opacity(0.85))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
-                        .background(
-                            Capsule()
-                                .fill(isSelected ? Color.primary.opacity(0.1) : Color(nsColor: .separatorColor).opacity(0.25))
-                        )
-                }
+            // Status Capsule
+            if folder.isDeleted {
+                Text("Deleted")
+                    .font(.system(size: 9, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundColor(.red.opacity(0.9))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(
+                        Capsule()
+                            .fill(Color.red.opacity(0.12))
+                    )
+                    .layoutPriority(10)
             }
-            .layoutPriority(10)
             
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .semibold))
@@ -278,34 +263,21 @@ private struct FileRowView: View {
             
             Spacer(minLength: 6)
             
-            // Status / Version Capsules
-            HStack(spacing: 4) {
-                if file.isCurrentDeleted {
-                    Text("Deleted")
-                        .font(.system(size: 9, weight: .semibold))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundColor(.red.opacity(0.9))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
-                        .background(
-                            Capsule()
-                                .fill(Color.red.opacity(0.12))
-                        )
-                }
-                Text("v\(file.versionCount)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            // Status Capsule
+            if file.isCurrentDeleted {
+                Text("Deleted")
+                    .font(.system(size: 9, weight: .semibold))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .foregroundColor(isSelected ? .primary : .secondary.opacity(0.85))
+                    .foregroundColor(.red.opacity(0.9))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2.5)
                     .background(
                         Capsule()
-                            .fill(isSelected ? Color.primary.opacity(0.1) : Color(nsColor: .separatorColor).opacity(0.25))
+                            .fill(Color.red.opacity(0.12))
                     )
+                    .layoutPriority(10)
             }
-            .layoutPriority(10)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)

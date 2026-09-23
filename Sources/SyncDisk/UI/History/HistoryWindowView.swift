@@ -459,13 +459,20 @@ public final class HistoryWindowViewModel: ObservableObject {
             currentFolderPath = parts.dropLast().joined(separator: "/")
         } else {
             currentFolderPath = nil
+            if case .source = sidebarSelection {
+                sidebarSelection = .allFiles
+            }
         }
         selectedFilePath = nil
         selectedFolder = nil
         selectedVersion = nil
         fileVersions = []
         if let engine = syncEngine {
-            recomputeDisplayedItems(syncEngine: engine)
+            if sidebarSelection == .allFiles && currentFolderPath == nil {
+                refreshFileList(syncEngine: engine)
+            } else {
+                recomputeDisplayedItems(syncEngine: engine)
+            }
         }
     }
     
@@ -952,6 +959,23 @@ public struct HistoryWindowView: View {
                         },
                         onSelectStorage: {
                             syncEngine.activeViewMode = .storage
+                        },
+                        onSelectSection: { section in
+                            switch section {
+                            case .source(let sourceId):
+                                if let src = syncEngine.config.sources.first(where: { $0.id == sourceId }) {
+                                    vm.currentFolderPath = src.name
+                                } else {
+                                    vm.currentFolderPath = nil
+                                }
+                            default:
+                                vm.currentFolderPath = nil
+                            }
+                            vm.selectedFilePath = nil
+                            vm.selectedFolder = nil
+                            vm.selectedVersion = nil
+                            vm.fileVersions = []
+                            vm.refreshFileList(syncEngine: syncEngine)
                         }
                     )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
@@ -963,44 +987,6 @@ public struct HistoryWindowView: View {
                 } content: {
                     VStack(spacing: 0) {
                         if syncEngine.activeViewMode == .files {
-                            // Sub-header when drilled into a folder
-                            if let folder = vm.currentFolderPath, !folder.isEmpty {
-                                HStack(spacing: 8) {
-                                    Button(action: {
-                                        vm.navigateUp(syncEngine: syncEngine)
-                                    }) {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "chevron.left")
-                                                .font(.system(size: 10, weight: .semibold))
-                                            Text("Back")
-                                                .font(.system(size: 11))
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .fill(Color(nsColor: .controlBackgroundColor))
-                                    )
-                                    
-                                    Image(systemName: "folder.fill")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(Color.accentColor)
-                                    
-                                    Text(folder.split(separator: "/").last.map(String.init) ?? folder)
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(.primary)
-                                    
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
-                                
-                                Divider()
-                            }
-                            
                             // File Manager: Icon Grid View vs List View
                             Group {
                                 if vm.layoutMode == .icons {
@@ -1024,6 +1010,12 @@ public struct HistoryWindowView: View {
                                             vm.selectedFolder = nil
                                             vm.selectedVersion = nil
                                             vm.fileVersions = []
+                                            let rootName = folderPath.split(separator: "/").first.map(String.init) ?? folderPath
+                                            if let matchingSource = syncEngine.config.sources.first(where: { $0.name == rootName }) {
+                                                if vm.sidebarSelection != .source(matchingSource.id) {
+                                                    vm.sidebarSelection = .source(matchingSource.id)
+                                                }
+                                            }
                                             vm.recomputeDisplayedItems(syncEngine: syncEngine)
                                         },
                                         onOpenFile: { file in
@@ -1051,6 +1043,12 @@ public struct HistoryWindowView: View {
                                             vm.selectedFolder = nil
                                             vm.selectedVersion = nil
                                             vm.fileVersions = []
+                                            let rootName = folderPath.split(separator: "/").first.map(String.init) ?? folderPath
+                                            if let matchingSource = syncEngine.config.sources.first(where: { $0.name == rootName }) {
+                                                if vm.sidebarSelection != .source(matchingSource.id) {
+                                                    vm.sidebarSelection = .source(matchingSource.id)
+                                                }
+                                            }
                                             vm.recomputeDisplayedItems(syncEngine: syncEngine)
                                         },
                                         onOpenFile: { file in
@@ -1073,6 +1071,18 @@ public struct HistoryWindowView: View {
                                     vm.selectedFolder = nil
                                     vm.selectedVersion = nil
                                     vm.fileVersions = []
+                                    if let path = folderPath, !path.isEmpty {
+                                        let rootName = path.split(separator: "/").first.map(String.init) ?? path
+                                        if let src = syncEngine.config.sources.first(where: { $0.name == rootName }) {
+                                            if vm.sidebarSelection != .source(src.id) {
+                                                vm.sidebarSelection = .source(src.id)
+                                            }
+                                        }
+                                    } else {
+                                        if case .source = vm.sidebarSelection {
+                                            vm.sidebarSelection = .allFiles
+                                        }
+                                    }
                                     vm.recomputeDisplayedItems(syncEngine: syncEngine)
                                 }
                             )
@@ -1104,6 +1114,13 @@ public struct HistoryWindowView: View {
                             vm.selectedFolder = nil
                             vm.selectedVersion = nil
                             vm.fileVersions = []
+                            let rootName = folderPath.split(separator: "/").first.map(String.init) ?? folderPath
+                            if let matchingSource = syncEngine.config.sources.first(where: { $0.name == rootName }) {
+                                if vm.sidebarSelection != .source(matchingSource.id) {
+                                    vm.sidebarSelection = .source(matchingSource.id)
+                                }
+                            }
+                            vm.recomputeDisplayedItems(syncEngine: syncEngine)
                         }
                     )
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: 520)
@@ -1123,8 +1140,25 @@ public struct HistoryWindowView: View {
                 syncEngine.showSettingsSheet = false
             })
         }
-        .onChange(of: vm.sidebarSelection) { _, _ in
-            vm.currentFolderPath = nil
+        .onChange(of: vm.sidebarSelection) { _, newSel in
+            switch newSel {
+            case .source(let sourceId):
+                if let src = syncEngine.config.sources.first(where: { $0.id == sourceId }) {
+                    if let cur = vm.currentFolderPath, cur == src.name || cur.hasPrefix(src.name + "/") {
+                        // Preserved
+                    } else {
+                        vm.currentFolderPath = src.name
+                    }
+                } else {
+                    vm.currentFolderPath = nil
+                }
+            default:
+                vm.currentFolderPath = nil
+            }
+            vm.selectedFilePath = nil
+            vm.selectedFolder = nil
+            vm.selectedVersion = nil
+            vm.fileVersions = []
             vm.refreshFileList(syncEngine: syncEngine)
         }
         .onChange(of: vm.searchText) { _, _ in

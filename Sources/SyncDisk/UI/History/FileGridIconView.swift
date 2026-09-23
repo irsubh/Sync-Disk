@@ -164,32 +164,13 @@ private struct FolderGridCard: View {
     var body: some View {
         VStack(spacing: 5) {
             // Folder Icon - Genuine macOS 3D Folder Icon with subtle version badge
-            ZStack(alignment: .topTrailing) {
-                Image(nsImage: Self.retinaFolderIcon)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 58, height: 50)
-                    .opacity(folder.isDeleted ? 0.6 : 1.0)
-                    .shadow(color: Color.black.opacity(folder.isDeleted ? 0.04 : 0.14), radius: 2.5, x: 0, y: 1.5)
-                
-                if folder.versionCount > 0 {
-                    Text("v\(folder.versionCount)")
-                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(folder.isDeleted ? .red.opacity(0.9) : .secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            Capsule()
-                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
-                                .overlay(
-                                    Capsule()
-                                        .stroke(folder.isDeleted ? Color.red.opacity(0.3) : Color.primary.opacity(0.12), lineWidth: 0.5)
-                                )
-                        )
-                        .offset(x: 4, y: -4)
-                }
-            }
-            .frame(width: 64, height: 60)
+            Image(nsImage: Self.retinaFolderIcon)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 58, height: 50)
+                .opacity(folder.isDeleted ? 0.6 : 1.0)
+                .shadow(color: Color.black.opacity(folder.isDeleted ? 0.04 : 0.14), radius: 2.5, x: 0, y: 1.5)
+                .frame(width: 64, height: 60)
             
             // Name
             Text(folder.name)
@@ -277,8 +258,7 @@ private struct FileGridCard: View {
     var body: some View {
         VStack(spacing: 5) {
             // Thumbnail / Icon (Genuine Mac App Icon, Raster Squircle, or macOS System Icon)
-            ZStack(alignment: .topTrailing) {
-                ZStack {
+            ZStack {
                     if let thumb = state.thumbnailImage {
                         if isAppBundle {
                             Image(nsImage: thumb)
@@ -311,25 +291,6 @@ private struct FileGridCard: View {
                         fileTypeIcon
                             .frame(width: 58, height: 58)
                             .opacity(file.isCurrentDeleted ? 0.6 : 1.0)
-                    }
-                }
-                .frame(width: 64, height: 60)
-                
-                if file.versionCount > 0 {
-                    Text("v\(file.versionCount)")
-                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(file.isCurrentDeleted ? .red.opacity(0.9) : .secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            Capsule()
-                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
-                                .overlay(
-                                    Capsule()
-                                        .stroke(file.isCurrentDeleted ? Color.red.opacity(0.3) : Color.primary.opacity(0.12), lineWidth: 0.5)
-                                )
-                        )
-                        .offset(x: 4, y: -4)
                 }
             }
             .frame(width: 64, height: 60)

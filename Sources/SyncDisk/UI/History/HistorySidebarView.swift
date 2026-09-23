@@ -16,6 +16,7 @@ public struct HistorySidebarView: View {
     public let deletedCount: Int
     public let onAddSource: () -> Void
     public let onSelectStorage: () -> Void
+    public let onSelectSection: ((HistorySidebarSelection) -> Void)?
     
     public init(
         syncEngine: SyncEngine,
@@ -24,7 +25,8 @@ public struct HistorySidebarView: View {
         activeCount: Int,
         deletedCount: Int,
         onAddSource: @escaping () -> Void = {},
-        onSelectStorage: @escaping () -> Void = {}
+        onSelectStorage: @escaping () -> Void = {},
+        onSelectSection: ((HistorySidebarSelection) -> Void)? = nil
     ) {
         self.syncEngine = syncEngine
         self._selection = selection
@@ -33,6 +35,7 @@ public struct HistorySidebarView: View {
         self.deletedCount = deletedCount
         self.onAddSource = onAddSource
         self.onSelectStorage = onSelectStorage
+        self.onSelectSection = onSelectSection
     }
     
     public var body: some View {
@@ -52,6 +55,7 @@ public struct HistorySidebarView: View {
                     isSelected: selection == .allFiles
                 ) {
                     selection = .allFiles
+                    onSelectSection?(.allFiles)
                 }
                 
                 sidebarRow(
@@ -61,6 +65,7 @@ public struct HistorySidebarView: View {
                     isSelected: selection == .activeOnly
                 ) {
                     selection = .activeOnly
+                    onSelectSection?(.activeOnly)
                 }
                 
                 sidebarRow(
@@ -70,6 +75,7 @@ public struct HistorySidebarView: View {
                     isSelected: selection == .deletedOnly
                 ) {
                     selection = .deletedOnly
+                    onSelectSection?(.deletedOnly)
                 }
             }
             
@@ -96,6 +102,7 @@ public struct HistorySidebarView: View {
                         isSelected: isSel
                     ) {
                         selection = .source(source.id)
+                        onSelectSection?(.source(source.id))
                     }
                 }
                 
