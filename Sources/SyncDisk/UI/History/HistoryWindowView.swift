@@ -156,17 +156,21 @@ public final class HistoryWindowViewModel: ObservableObject {
             // Active = on destination disk
             let active = liveFilePaths.count
             
-            // Deleted = in history but NOT currently on destination disk
-            let deleted = historyPaths.filter { path in
-                !liveFilePaths.contains(path)
-            }.count
+            // History = files with archived old versions (deleted OR modified with old copies in .backup)
+            // versionCount > 1 means this file has at least one old archived copy in .backup
+            // isDeleted means it was removed from disk but archived
+            let historyFileSet = historyFiles.filter { file in
+                let isDeletedFromDisk = !liveFilePaths.contains(file.logicalPath)
+                let hasArchivedVersions = file.versionCount > 1
+                return isDeletedFromDisk || hasArchivedVersions
+            }
             
             // Total = all unique file paths across both live destination + history
             let allPaths = liveFilePaths.union(historyPaths)
             
             self.totalCount = allPaths.count
             self.activeCount = active
-            self.deletedCount = deleted
+            self.deletedCount = historyFileSet.count
         } catch {
             // Fallback to live count only
             self.totalCount = liveFilePaths.count
@@ -365,11 +369,24 @@ public final class HistoryWindowViewModel: ObservableObject {
                 }
             }
 
-            // 3. For History or All files view: show deleted/historical entries
+            // 3. For History or All files view: show files with archived history
+            // This includes:
+            //   a) Files deleted from disk (classic deleted history)
+            //   b) Files that are STILL live but have old archived versions in .backup (versionCount > 1)
             if currentFilter == .history || currentFilter == .all {
                 for hist in historyFiles {
-                    let isDeleted = hist.isDeleted || !allLivePathsSet.contains(hist.logicalPath)
-                    guard isDeleted else { continue }
+                    let isDeletedFromDisk = hist.isDeleted || !allLivePathsSet.contains(hist.logicalPath)
+                    let hasArchivedVersions = hist.versionCount > 1
+                    
+                    // Show in History if: deleted from disk OR has old versions archived
+                    guard isDeletedFromDisk || hasArchivedVersions else { continue }
+                    
+                    // For .all filter: skip files already added in the live enumeration pass (non-deleted active files)
+                    // For .history filter: we want ONLY the historical view, so include all qualifying files
+                    if currentFilter == .all && !isDeletedFromDisk {
+                        // Already in liveFilesForView from the enumeration above — skip duplicate
+                        continue
+                    }
                     
                     // Add directory parts to allDirectoriesSet so deleted folders can be navigated into
                     let parts = hist.logicalPath.split(separator: "/")
@@ -392,9 +409,9 @@ public final class HistoryWindowViewModel: ObservableObject {
                               hist.logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
                     }
                     
-                    var deletedHist = hist
-                    if !deletedHist.isDeleted {
-                        deletedHist = TrackedFileInfo(
+                    if isDeletedFromDisk && !hist.isDeleted {
+                        // Mark as deleted since it's no longer on disk
+                        liveFilesForView.append(TrackedFileInfo(
                             logicalPath: hist.logicalPath,
                             originalFilename: hist.originalFilename,
                             lastChangeType: .deleted,
@@ -402,9 +419,10 @@ public final class HistoryWindowViewModel: ObservableObject {
                             fileSize: hist.fileSize,
                             versionCount: hist.versionCount,
                             isDeleted: true
-                        )
+                        ))
+                    } else {
+                        liveFilesForView.append(hist)
                     }
-                    liveFilesForView.append(deletedHist)
                 }
             }
 
