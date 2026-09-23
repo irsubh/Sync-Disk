@@ -26,8 +26,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     @Published public var activeViewMode: HistoryViewMode = .files
     @Published public var showSettingsSheet: Bool = false
     
-    public let database: HistoryDatabase
-    public let storageManager: HistoryStorageManager
+    public private(set) var database: HistoryDatabase
+    public private(set) var storageManager: HistoryStorageManager
     public let storageMetrics = StorageMetrics()
     public let fsMonitor = FSEventsMonitor()
     public let diskMonitor = DiskMonitor()
@@ -101,6 +101,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         diskMonitor.onStatusChange = { [weak self] isConnected in
             guard let self = self else { return }
             if isConnected {
+                self.updateHistoryLocationIfNeeded()
                 self.database.reloadFromStorage()
             }
             Task { @MainActor in
@@ -146,12 +147,14 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     
     public func start() {
         guard !isEngineActive else {
+            updateHistoryLocationIfNeeded()
             diskMonitor.checkStatus(forceNotify: true)
             refreshDiskStatus(force: true)
             return
         }
         isEngineActive = true
         
+        updateHistoryLocationIfNeeded()
         // 1. Crash Recovery on startup
         recoverFromCrash()
         database.reloadFromStorage()
@@ -189,11 +192,22 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         diskMonitor.onStatusChange = nil
     }
     
+    public func updateHistoryLocationIfNeeded() {
+        guard let dest = config.syncDestination, diskMonitor.isConnected else { return }
+        let targetHistoryURL = config.effectiveHistoryURL ?? dest.appendingPathComponent(".backup", isDirectory: true)
+        if storageManager.historyBaseURL.standardizedFileURL.path != targetHistoryURL.standardizedFileURL.path {
+            self.storageManager = HistoryStorageManager(historyBaseURL: targetHistoryURL)
+            self.database = HistoryDatabase(storageBaseURL: targetHistoryURL)
+            self.historyRevision += 1
+        }
+    }
+    
     public func updateConfig(_ newConfig: SyncConfig) {
         self.config = newConfig
         try? newConfig.save()
         
         diskMonitor.destinationURL = newConfig.syncDestination
+        updateHistoryLocationIfNeeded()
         
         if isEngineActive {
             startFSEventsMonitor()

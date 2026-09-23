@@ -91,7 +91,7 @@ public final class StorageMetrics: @unchecked Sendable {
         historySize = cachedHistorySize
         metricsLock.unlock()
         
-        let shouldDeepScan = forceDeepScan || (hasAnyMirrorFolder && syncedSize == 0 && now.timeIntervalSince(lastFullScanDate) > 60)
+        let shouldDeepScan = forceDeepScan || (hasAnyMirrorFolder && syncedSize == 0) || (hasHistoryFolder && historySize == 0) || (now.timeIntervalSince(lastFullScanDate) > 60)
         
         if shouldDeepScan {
             if !sources.isEmpty {

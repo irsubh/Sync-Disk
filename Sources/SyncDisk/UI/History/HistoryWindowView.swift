@@ -21,7 +21,36 @@ public enum FileSortOption: String, CaseIterable, Sendable {
 
 @MainActor
 public final class HistoryWindowViewModel: ObservableObject {
-    @Published public var sidebarSelection: HistorySidebarSelection = .allFiles
+    @Published public var libraryFilter: HistoryLibraryFilter = .all
+    @Published public var selectedSourceId: UUID? = nil
+    
+    public var sidebarSelection: HistorySidebarSelection {
+        get {
+            if let sid = selectedSourceId {
+                return .source(sid)
+            }
+            switch libraryFilter {
+            case .all: return .allFiles
+            case .active: return .activeOnly
+            case .history: return .deletedOnly
+            }
+        }
+        set {
+            switch newValue {
+            case .allFiles:
+                libraryFilter = .all
+                selectedSourceId = nil
+            case .activeOnly:
+                libraryFilter = .active
+                selectedSourceId = nil
+            case .deletedOnly:
+                libraryFilter = .history
+                selectedSourceId = nil
+            case .source(let id):
+                selectedSourceId = id
+            }
+        }
+    }
     @Published public var searchText: String = ""
     @Published public var trackedFiles: [TrackedFileInfo] = []
     @Published public var selectedFilePath: String?
@@ -185,7 +214,8 @@ public final class HistoryWindowViewModel: ObservableObject {
     
     public func refreshFileList(syncEngine: SyncEngine) {
         syncEngine.database.reloadFromStorageIfNeeded()
-        let sidebarSel = sidebarSelection
+        let currentFilter = libraryFilter
+        let currentSourceId = selectedSourceId
         let searchQ = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -204,7 +234,6 @@ public final class HistoryWindowViewModel: ObservableObject {
             var allDirectoriesSet: Set<String> = []
             var liveFilesForView: [TrackedFileInfo] = []
 
-            let showDeletedOnly = (sidebarSel == .deletedOnly)
             let destBase = syncEngine.config.syncDestination
             let isDestConnected = syncEngine.diskMonitor.isConnected
 
@@ -260,15 +289,12 @@ public final class HistoryWindowViewModel: ObservableObject {
                         allLivePathsSet.insert(logicalPath)
                         
                         // Filter for current view
-                        let matchesSourceFilter: Bool
-                        switch sidebarSel {
-                        case .source(let sid):
-                            matchesSourceFilter = (source.id == sid)
-                        default:
-                            matchesSourceFilter = true
+                        if let sid = currentSourceId {
+                            guard source.id == sid else { continue }
                         }
                         
-                        guard matchesSourceFilter && !showDeletedOnly else { continue }
+                        // In History view mode, only show historical/deleted files, skip active live files
+                        guard currentFilter != .history else { continue }
                         
                         if !searchQ.isEmpty {
                             guard name.localizedCaseInsensitiveContains(searchQ) ||
@@ -325,15 +351,12 @@ public final class HistoryWindowViewModel: ObservableObject {
                         }
                     }
                     
-                    let matchesSourceFilter: Bool
-                    switch sidebarSel {
-                    case .source(let sid):
-                        matchesSourceFilter = sources.first(where: { $0.id == sid }).map { hist.logicalPath.hasPrefix($0.name + "/") } ?? true
-                    default:
-                        matchesSourceFilter = true
+                    if let sid = currentSourceId,
+                       let src = sources.first(where: { $0.id == sid }) {
+                        guard hist.logicalPath.hasPrefix(src.name + "/") else { continue }
                     }
                     
-                    guard matchesSourceFilter && !showDeletedOnly else { continue }
+                    guard currentFilter != .history else { continue }
                     if !searchQ.isEmpty {
                         guard hist.originalFilename.localizedCaseInsensitiveContains(searchQ) ||
                               hist.logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
@@ -342,12 +365,25 @@ public final class HistoryWindowViewModel: ObservableObject {
                 }
             }
 
-            // 3. For History/deleted-only view: show history entries not present on disk
-            let includeDeleted = (showDeletedOnly || sidebarSel == .allFiles)
-            if includeDeleted {
-                for hist in historyFiles where hist.isDeleted {
-                    guard !allLivePathsSet.contains(hist.logicalPath) else { continue }
-                    if case .source(let sid) = sidebarSel,
+            // 3. For History or All files view: show deleted/historical entries
+            if currentFilter == .history || currentFilter == .all {
+                for hist in historyFiles {
+                    let isDeleted = hist.isDeleted || !allLivePathsSet.contains(hist.logicalPath)
+                    guard isDeleted else { continue }
+                    
+                    // Add directory parts to allDirectoriesSet so deleted folders can be navigated into
+                    let parts = hist.logicalPath.split(separator: "/")
+                    if parts.count > 1 {
+                        var dirAccum = ""
+                        for part in parts.dropLast() {
+                            let partStr = String(part)
+                            if partStr.lowercased().hasSuffix(".app") { break }
+                            dirAccum = dirAccum.isEmpty ? partStr : "\(dirAccum)/\(partStr)"
+                            allDirectoriesSet.insert(dirAccum)
+                        }
+                    }
+                    
+                    if let sid = currentSourceId,
                        let src = sources.first(where: { $0.id == sid }) {
                         guard hist.logicalPath.hasPrefix(src.name + "/") else { continue }
                     }
@@ -355,7 +391,20 @@ public final class HistoryWindowViewModel: ObservableObject {
                         guard hist.originalFilename.localizedCaseInsensitiveContains(searchQ) ||
                               hist.logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
                     }
-                    liveFilesForView.append(hist)
+                    
+                    var deletedHist = hist
+                    if !deletedHist.isDeleted {
+                        deletedHist = TrackedFileInfo(
+                            logicalPath: hist.logicalPath,
+                            originalFilename: hist.originalFilename,
+                            lastChangeType: .deleted,
+                            lastTimestamp: hist.lastTimestamp,
+                            fileSize: hist.fileSize,
+                            versionCount: hist.versionCount,
+                            isDeleted: true
+                        )
+                    }
+                    liveFilesForView.append(deletedHist)
                 }
             }
 
@@ -459,27 +508,21 @@ public final class HistoryWindowViewModel: ObservableObject {
             currentFolderPath = parts.dropLast().joined(separator: "/")
         } else {
             currentFolderPath = nil
-            if case .source = sidebarSelection {
-                sidebarSelection = .allFiles
-            }
+            selectedSourceId = nil
         }
         selectedFilePath = nil
         selectedFolder = nil
         selectedVersion = nil
         fileVersions = []
         if let engine = syncEngine {
-            if sidebarSelection == .allFiles && currentFolderPath == nil {
-                refreshFileList(syncEngine: engine)
-            } else {
-                recomputeDisplayedItems(syncEngine: engine)
-            }
+            refreshFileList(syncEngine: engine)
         }
     }
     
     public func isFolderDeleted(folderFullPath: String, syncEngine: SyncEngine) -> Bool {
         let fm = FileManager.default
         
-        // 1. Check live sources
+        // 1. Check live sources on Mac
         var existsInSource = false
         var checkedAnySource = false
         for source in syncEngine.config.sources where source.isEnabled {
@@ -525,12 +568,6 @@ public final class HistoryWindowViewModel: ObservableObject {
             return true
         }
         
-        // If all known files inside this folder in history are marked deleted, then the folder is deleted
-        let filesInFolder = trackedFiles.filter { $0.logicalPath.hasPrefix(folderFullPath + "/") }
-        if !filesInFolder.isEmpty && !filesInFolder.contains(where: { !$0.isDeleted }) {
-            return true
-        }
-        
         return false
     }
 
@@ -540,8 +577,8 @@ public final class HistoryWindowViewModel: ObservableObject {
         }
         
         let path = currentFolderPath ?? {
-            if case .source(let sourceId) = sidebarSelection,
-               let src = syncEngine.config.sources.first(where: { $0.id == sourceId }) {
+            if let sid = selectedSourceId,
+               let src = syncEngine.config.sources.first(where: { $0.id == sid }) {
                 return src.name
             }
             return nil
@@ -549,7 +586,7 @@ public final class HistoryWindowViewModel: ObservableObject {
         
         guard let currentPath = path, !currentPath.isEmpty else {
             return FolderDisplayItem(
-                name: "All Files",
+                name: libraryFilter.rawValue,
                 path: "",
                 itemCount: syncEngine.config.sources.count,
                 lastTimestamp: trackedFiles.first?.lastTimestamp ?? Date(),
@@ -614,33 +651,56 @@ public final class HistoryWindowViewModel: ObservableObject {
         
         var basePrefix = currentFolderPath ?? ""
         if basePrefix.isEmpty {
-            if case .source(let sourceId) = sidebarSelection,
-               let src = syncEngine.config.sources.first(where: { $0.id == sourceId }) {
+            if let sid = selectedSourceId,
+               let src = syncEngine.config.sources.first(where: { $0.id == sid }) {
                 basePrefix = src.name
             }
         }
+        
+        let currentFilter = libraryFilter
         
         // Step 1: Collect immediate folder names and immediate files directly in basePrefix
         var immediateFolderNames = Set<String>()
         var immediateFiles: [TrackedFileInfo] = []
         
-        // Discovered directories from disk
-        for dirPath in knownDirectoryPaths {
-            let rel: String
-            if basePrefix.isEmpty {
-                rel = dirPath
-            } else if dirPath.hasPrefix(basePrefix + "/") {
-                rel = String(dirPath.dropFirst(basePrefix.count + 1))
-            } else {
-                continue
-            }
-            let parts = rel.split(separator: "/")
-            if parts.count >= 1 {
-                let firstPart = String(parts[0])
-                if firstPart.lowercased().hasSuffix(".app") {
+        if currentFilter == .history {
+            // In History mode: only gather immediate folder names that contain deleted files
+            for file in trackedFiles {
+                let rel: Substring
+                if basePrefix.isEmpty {
+                    rel = file.logicalPath[...]
+                } else if file.logicalPath.hasPrefix(basePrefix + "/") {
+                    rel = file.logicalPath.dropFirst(basePrefix.count + 1)
+                } else {
                     continue
                 }
-                immediateFolderNames.insert(firstPart)
+                let parts = rel.split(separator: "/")
+                if parts.count > 1 {
+                    let firstPart = String(parts[0])
+                    if firstPart != basePrefix && !firstPart.isEmpty && !firstPart.lowercased().hasSuffix(".app") {
+                        immediateFolderNames.insert(firstPart)
+                    }
+                }
+            }
+        } else {
+            // Discovered directories from disk
+            for dirPath in knownDirectoryPaths {
+                let rel: String
+                if basePrefix.isEmpty {
+                    rel = dirPath
+                } else if dirPath.hasPrefix(basePrefix + "/") {
+                    rel = String(dirPath.dropFirst(basePrefix.count + 1))
+                } else {
+                    continue
+                }
+                let parts = rel.split(separator: "/")
+                if parts.count >= 1 {
+                    let firstPart = String(parts[0])
+                    if firstPart.lowercased().hasSuffix(".app") || firstPart == basePrefix || firstPart.isEmpty {
+                        continue
+                    }
+                    immediateFolderNames.insert(firstPart)
+                }
             }
         }
         
@@ -653,10 +713,8 @@ public final class HistoryWindowViewModel: ObservableObject {
                 rel = file.logicalPath[...]
             } else if file.logicalPath.hasPrefix(basePrefix + "/") {
                 rel = file.logicalPath.dropFirst(basePrefix.count + 1)
-            } else if file.logicalPath == basePrefix {
-                immediateFiles.append(file)
-                continue
             } else {
+                // Never add basePrefix as an item inside itself!
                 continue
             }
             
@@ -689,7 +747,9 @@ public final class HistoryWindowViewModel: ObservableObject {
                     }
                     continue
                 }
-                immediateFolderNames.insert(firstPart)
+                if firstPart != basePrefix && !firstPart.isEmpty {
+                    immediateFolderNames.insert(firstPart)
+                }
             } else if parts.count == 1 {
                 let firstPart = String(parts[0])
                 if firstPart.lowercased().hasSuffix(".app") {
@@ -725,9 +785,6 @@ public final class HistoryWindowViewModel: ObservableObject {
         }
         
         // Step 2: For each immediate folder, calculate its direct children count and latest timestamp
-        // A child of folder F is:
-        // - Any unique immediate subfolder name directly inside F
-        // - Any file directly inside F
         var folderInfo: [String: (itemCount: Int, lastTimestamp: Date, isDeleted: Bool, versionCount: Int)] = [:]
         
         for folderName in immediateFolderNames {
@@ -736,39 +793,56 @@ public final class HistoryWindowViewModel: ObservableObject {
             var directFileCount = 0
             var latestDate = Date.distantPast
             
-            for dirPath in knownDirectoryPaths {
-                if dirPath.hasPrefix(folderFullPath + "/") {
-                    let subRel = String(dirPath.dropFirst(folderFullPath.count + 1))
-                    let subParts = subRel.split(separator: "/")
-                    if let firstSub = subParts.first {
-                        let subStr = String(firstSub)
-                        if !subStr.lowercased().hasSuffix(".app") {
-                            subfolderNames.insert(subStr)
+            if currentFilter == .history {
+                // In history mode, count children based strictly on tracked files that are deleted
+                for file in trackedFiles {
+                    if file.logicalPath.hasPrefix(folderFullPath + "/") {
+                        let subRel = String(file.logicalPath.dropFirst(folderFullPath.count + 1))
+                        let subParts = subRel.split(separator: "/")
+                        if subParts.count == 1 {
+                            directFileCount += 1
+                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
+                        } else if subParts.count > 1 {
+                            subfolderNames.insert(String(subParts[0]))
+                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
                         }
                     }
                 }
-            }
-            
-            var countedAppsInFolder = Set<String>()
-            for file in trackedFiles {
-                if file.logicalPath.hasPrefix(folderFullPath + "/") {
-                    let subRel = String(file.logicalPath.dropFirst(folderFullPath.count + 1))
-                    let subParts = subRel.split(separator: "/")
-                    if let firstSub = subParts.first, String(firstSub).lowercased().hasSuffix(".app") {
-                        let appName = String(firstSub)
-                        if !countedAppsInFolder.contains(appName) {
-                            countedAppsInFolder.insert(appName)
+            } else {
+                for dirPath in knownDirectoryPaths {
+                    if dirPath.hasPrefix(folderFullPath + "/") {
+                        let subRel = String(dirPath.dropFirst(folderFullPath.count + 1))
+                        let subParts = subRel.split(separator: "/")
+                        if let firstSub = subParts.first {
+                            let subStr = String(firstSub)
+                            if !subStr.lowercased().hasSuffix(".app") {
+                                subfolderNames.insert(subStr)
+                            }
+                        }
+                    }
+                }
+                
+                var countedAppsInFolder = Set<String>()
+                for file in trackedFiles {
+                    if file.logicalPath.hasPrefix(folderFullPath + "/") {
+                        let subRel = String(file.logicalPath.dropFirst(folderFullPath.count + 1))
+                        let subParts = subRel.split(separator: "/")
+                        if let firstSub = subParts.first, String(firstSub).lowercased().hasSuffix(".app") {
+                            let appName = String(firstSub)
+                            if !countedAppsInFolder.contains(appName) {
+                                countedAppsInFolder.insert(appName)
+                                directFileCount += 1
+                                if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
+                            }
+                            continue
+                        }
+                        if subParts.count == 1 {
                             directFileCount += 1
                             if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
+                        } else if subParts.count > 1 {
+                            subfolderNames.insert(String(subParts[0]))
+                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
                         }
-                        continue
-                    }
-                    if subParts.count == 1 {
-                        directFileCount += 1
-                        if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
-                    } else if subParts.count > 1 {
-                        subfolderNames.insert(String(subParts[0]))
-                        if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
                     }
                 }
             }
@@ -787,10 +861,15 @@ public final class HistoryWindowViewModel: ObservableObject {
             )
         }
         
-        // Filter out deleted folders when viewing Active files only
+        // Filter folders according to active library filter
         let filteredFolderNames = immediateFolderNames.filter { folderName in
-            if sidebarSelection == .activeOnly {
+            if currentFilter == .active {
                 return !(folderInfo[folderName]?.isDeleted ?? false)
+            }
+            if currentFilter == .history {
+                let count = folderInfo[folderName]?.itemCount ?? 0
+                let isDeleted = folderInfo[folderName]?.isDeleted ?? false
+                return count > 0 || isDeleted
             }
             return true
         }
@@ -919,7 +998,8 @@ public struct HistoryWindowView: View {
                 NavigationSplitView(columnVisibility: $vm.columnVisibility) {
                     HistorySidebarView(
                         syncEngine: syncEngine,
-                        selection: $vm.sidebarSelection,
+                        libraryFilter: $vm.libraryFilter,
+                        selectedSourceId: $vm.selectedSourceId,
                         totalFileCount: vm.totalCount,
                         activeCount: vm.activeCount,
                         deletedCount: vm.deletedCount,
@@ -928,6 +1008,21 @@ public struct HistoryWindowView: View {
                         },
                         onSelectStorage: {
                             syncEngine.activeViewMode = .storage
+                        },
+                        onFilterChange: { newFilter, newSourceId in
+                            syncEngine.activeViewMode = .files
+                            vm.libraryFilter = newFilter
+                            vm.selectedSourceId = newSourceId
+                            if let sid = newSourceId, let src = syncEngine.config.sources.first(where: { $0.id == sid }) {
+                                vm.currentFolderPath = src.name
+                            } else {
+                                vm.currentFolderPath = nil
+                            }
+                            vm.selectedFilePath = nil
+                            vm.selectedFolder = nil
+                            vm.selectedVersion = nil
+                            vm.fileVersions = []
+                            vm.refreshFileList(syncEngine: syncEngine)
                         }
                     )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
@@ -950,7 +1045,8 @@ public struct HistoryWindowView: View {
                 NavigationSplitView(columnVisibility: $vm.columnVisibility) {
                     HistorySidebarView(
                         syncEngine: syncEngine,
-                        selection: $vm.sidebarSelection,
+                        libraryFilter: $vm.libraryFilter,
+                        selectedSourceId: $vm.selectedSourceId,
                         totalFileCount: vm.totalCount,
                         activeCount: vm.activeCount,
                         deletedCount: vm.deletedCount,
@@ -960,15 +1056,13 @@ public struct HistoryWindowView: View {
                         onSelectStorage: {
                             syncEngine.activeViewMode = .storage
                         },
-                        onSelectSection: { section in
-                            switch section {
-                            case .source(let sourceId):
-                                if let src = syncEngine.config.sources.first(where: { $0.id == sourceId }) {
-                                    vm.currentFolderPath = src.name
-                                } else {
-                                    vm.currentFolderPath = nil
-                                }
-                            default:
+                        onFilterChange: { newFilter, newSourceId in
+                            syncEngine.activeViewMode = .files
+                            vm.libraryFilter = newFilter
+                            vm.selectedSourceId = newSourceId
+                            if let sid = newSourceId, let src = syncEngine.config.sources.first(where: { $0.id == sid }) {
+                                vm.currentFolderPath = src.name
+                            } else {
                                 vm.currentFolderPath = nil
                             }
                             vm.selectedFilePath = nil
@@ -1012,11 +1106,11 @@ public struct HistoryWindowView: View {
                                             vm.fileVersions = []
                                             let rootName = folderPath.split(separator: "/").first.map(String.init) ?? folderPath
                                             if let matchingSource = syncEngine.config.sources.first(where: { $0.name == rootName }) {
-                                                if vm.sidebarSelection != .source(matchingSource.id) {
-                                                    vm.sidebarSelection = .source(matchingSource.id)
+                                                if vm.selectedSourceId != matchingSource.id {
+                                                    vm.selectedSourceId = matchingSource.id
                                                 }
                                             }
-                                            vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                                            vm.refreshFileList(syncEngine: syncEngine)
                                         },
                                         onOpenFile: { file in
                                             vm.openFile(file, syncEngine: syncEngine)
@@ -1045,11 +1139,11 @@ public struct HistoryWindowView: View {
                                             vm.fileVersions = []
                                             let rootName = folderPath.split(separator: "/").first.map(String.init) ?? folderPath
                                             if let matchingSource = syncEngine.config.sources.first(where: { $0.name == rootName }) {
-                                                if vm.sidebarSelection != .source(matchingSource.id) {
-                                                    vm.sidebarSelection = .source(matchingSource.id)
+                                                if vm.selectedSourceId != matchingSource.id {
+                                                    vm.selectedSourceId = matchingSource.id
                                                 }
                                             }
-                                            vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                                            vm.refreshFileList(syncEngine: syncEngine)
                                         },
                                         onOpenFile: { file in
                                             vm.openFile(file, syncEngine: syncEngine)
@@ -1074,16 +1168,14 @@ public struct HistoryWindowView: View {
                                     if let path = folderPath, !path.isEmpty {
                                         let rootName = path.split(separator: "/").first.map(String.init) ?? path
                                         if let src = syncEngine.config.sources.first(where: { $0.name == rootName }) {
-                                            if vm.sidebarSelection != .source(src.id) {
-                                                vm.sidebarSelection = .source(src.id)
+                                            if vm.selectedSourceId != src.id {
+                                                vm.selectedSourceId = src.id
                                             }
                                         }
                                     } else {
-                                        if case .source = vm.sidebarSelection {
-                                            vm.sidebarSelection = .allFiles
-                                        }
+                                        vm.selectedSourceId = nil
                                     }
-                                    vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                                    vm.refreshFileList(syncEngine: syncEngine)
                                 }
                             )
                         } else {
@@ -1116,11 +1208,11 @@ public struct HistoryWindowView: View {
                             vm.fileVersions = []
                             let rootName = folderPath.split(separator: "/").first.map(String.init) ?? folderPath
                             if let matchingSource = syncEngine.config.sources.first(where: { $0.name == rootName }) {
-                                if vm.sidebarSelection != .source(matchingSource.id) {
-                                    vm.sidebarSelection = .source(matchingSource.id)
+                                if vm.selectedSourceId != matchingSource.id {
+                                    vm.selectedSourceId = matchingSource.id
                                 }
                             }
-                            vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                            vm.refreshFileList(syncEngine: syncEngine)
                         }
                     )
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: 520)
@@ -1140,25 +1232,10 @@ public struct HistoryWindowView: View {
                 syncEngine.showSettingsSheet = false
             })
         }
-        .onChange(of: vm.sidebarSelection) { _, newSel in
-            switch newSel {
-            case .source(let sourceId):
-                if let src = syncEngine.config.sources.first(where: { $0.id == sourceId }) {
-                    if let cur = vm.currentFolderPath, cur == src.name || cur.hasPrefix(src.name + "/") {
-                        // Preserved
-                    } else {
-                        vm.currentFolderPath = src.name
-                    }
-                } else {
-                    vm.currentFolderPath = nil
-                }
-            default:
-                vm.currentFolderPath = nil
-            }
-            vm.selectedFilePath = nil
-            vm.selectedFolder = nil
-            vm.selectedVersion = nil
-            vm.fileVersions = []
+        .onChange(of: vm.libraryFilter) { _, _ in
+            vm.refreshFileList(syncEngine: syncEngine)
+        }
+        .onChange(of: vm.selectedSourceId) { _, _ in
             vm.refreshFileList(syncEngine: syncEngine)
         }
         .onChange(of: vm.searchText) { _, _ in
