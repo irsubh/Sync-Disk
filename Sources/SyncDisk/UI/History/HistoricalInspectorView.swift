@@ -42,6 +42,12 @@ public struct HistoricalInspectorView: View {
         self.onOpenFolder = onOpenFolder
     }
     
+    private var isFileDeleted: Bool {
+        if let current = entry, current.changeType == .deleted { return true }
+        if let first = allVersions.first, first.changeType == .deleted { return true }
+        return false
+    }
+    
     private var fileExtension: String {
         guard let name = entry?.originalFilename else { return "" }
         return (name as NSString).pathExtension.lowercased()
@@ -397,6 +403,7 @@ public struct HistoricalInspectorView: View {
             VStack(alignment: .center, spacing: 3) {
                 Text(version.originalFilename)
                     .font(.system(size: 14.5, weight: .semibold))
+                    .foregroundColor(isFileDeleted ? .secondary : .primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 
@@ -406,9 +413,19 @@ public struct HistoricalInspectorView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 
-                Text("\(fileExtension.uppercased()) · \(ByteCountFormatter.string(fromByteCount: effectiveFileSize(for: version), countStyle: .file))")
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary.opacity(0.8))
+                HStack(spacing: 5) {
+                    if isFileDeleted {
+                        Text("DELETED")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color.red.opacity(0.85)))
+                    }
+                    Text("\(fileExtension.uppercased()) · \(ByteCountFormatter.string(fromByteCount: effectiveFileSize(for: version), countStyle: .file))")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary.opacity(0.8))
+                }
             }
             .frame(maxWidth: .infinity)
         }
@@ -603,14 +620,14 @@ public struct HistoricalInspectorView: View {
             HStack(alignment: .top, spacing: 10) {
                 // Connection line & Dot (● current/deleted, ○ previous)
                 VStack(spacing: 0) {
-                    if entry.isCurrentVersion {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 7, height: 7)
-                            .padding(.top, 4)
-                    } else if entry.changeType == .deleted {
+                    if entry.changeType == .deleted {
                         Circle()
                             .fill(Color.red)
+                            .frame(width: 7, height: 7)
+                            .padding(.top, 4)
+                    } else if entry.isCurrentVersion {
+                        Circle()
+                            .fill(Color.green)
                             .frame(width: 7, height: 7)
                             .padding(.top, 4)
                     } else {
@@ -637,8 +654,8 @@ public struct HistoricalInspectorView: View {
                             .foregroundColor(.primary)
                         
                         Text(humanChangeText(entry.changeType))
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                            .font(.system(size: 11, weight: entry.changeType == .deleted ? .semibold : .regular))
+                            .foregroundColor(entry.changeType == .deleted ? .red : .secondary)
                         
                         Spacer()
                         
@@ -756,8 +773,12 @@ public struct HistoricalInspectorView: View {
             Spacer()
             
             Button(action: { vm.showRestoreConfirmation = true }) {
-                Text("Restore")
-                    .font(.system(size: 11, weight: .medium))
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(isFileDeleted ? "Restore File" : "Restore")
+                        .font(.system(size: 11, weight: .medium))
+                }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
@@ -896,10 +917,21 @@ public struct HistoricalInspectorView: View {
         // Fast path: Direct file preview using centralized resolver
         var directURL: URL? = syncEngine.resolveURL(for: ver.logicalPath)
         
-        if directURL == nil && !ver.historyRelativePath.isEmpty {
+        // If file doesn't exist locally or is deleted, try the snapshot URL
+        if (directURL == nil || !FileManager.default.fileExists(atPath: directURL!.path)) && !ver.historyRelativePath.isEmpty {
             let snapURL = syncEngine.storageManager.historyBaseURL.appendingPathComponent(ver.historyRelativePath)
             if FileManager.default.fileExists(atPath: snapURL.path) {
                 directURL = snapURL
+            }
+        }
+        
+        // Fallback: look for any available snapshot from other versions of this file
+        if directURL == nil || !FileManager.default.fileExists(atPath: directURL!.path) {
+            if let nonDel = allVersions.first(where: { !$0.historyRelativePath.isEmpty }) {
+                let snapURL = syncEngine.storageManager.historyBaseURL.appendingPathComponent(nonDel.historyRelativePath)
+                if FileManager.default.fileExists(atPath: snapURL.path) {
+                    directURL = snapURL
+                }
             }
         }
         

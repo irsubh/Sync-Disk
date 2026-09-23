@@ -29,15 +29,22 @@ public final class WindowManager: NSObject, ObservableObject, NSWindowDelegate {
         let contentView = HistoryWindowView(syncEngine: syncEngine)
         let hostingController = NSHostingController(rootView: contentView)
         
+        var initialWidth: CGFloat = 1680
+        var initialHeight: CGFloat = 888
+        if let screenFrame = NSScreen.main?.visibleFrame {
+            initialWidth = min(initialWidth, screenFrame.width * 0.95)
+            initialHeight = min(initialHeight, screenFrame.height * 0.95)
+        }
+        
         let window = NSWindow(
-            contentRect: NSRect(x: 120, y: 120, width: 1200, height: 740),
+            contentRect: NSRect(x: 120, y: 120, width: initialWidth, height: initialHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         
         window.title = "Sync Disk"
-        window.minSize = NSSize(width: 960, height: 580)
+        window.minSize = NSSize(width: 1080, height: 620)
         window.toolbarStyle = .unifiedCompact
         window.titleVisibility = .hidden
         window.contentViewController = hostingController

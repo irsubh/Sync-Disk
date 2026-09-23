@@ -35,7 +35,7 @@ public struct FileHistoryEntry: Codable, Identifiable, Hashable, Sendable {
     public let previousPath: String?        // For renamed files
     public var fileSize: Int64
     public let sha256: String
-    public let historyRelativePath: String  // Relative path inside backup history storage
+    public var historyRelativePath: String  // Relative path inside backup history storage
     public var isCurrentVersion: Bool
     public var versionNumber: Int
     

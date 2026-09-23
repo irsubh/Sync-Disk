@@ -220,15 +220,6 @@ public struct HistorySidebarView: View {
                 
                 Spacer()
                 
-                if isFilterActiveOnSource {
-                    Text("Filter")
-                        .font(.system(size: 9, weight: .semibold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-                        .foregroundColor(.accentColor)
-                }
-                
                 if let c = count {
                     Text("\(c)")
                         .font(.system(size: 11, weight: .regular, design: .monospaced))

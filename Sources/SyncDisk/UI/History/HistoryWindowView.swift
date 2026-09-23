@@ -465,6 +465,59 @@ public final class HistoryWindowViewModel: ObservableObject {
                     }
                 }
             }
+            // Check if this item is marked deleted or missing from the live source folder
+            let isTrackedDeleted = trackedFiles.first(where: { $0.logicalPath == path })?.isDeleted == true
+            let localSourceExists: Bool = {
+                if let engine = syncEngine, let targetURL = engine.resolveURL(for: path) {
+                    return FileManager.default.fileExists(atPath: targetURL.path)
+                }
+                return true
+            }()
+            let isItemDeleted = isTrackedDeleted || !localSourceExists
+            
+            if isItemDeleted {
+                if !vers.contains(where: { $0.changeType == .deleted }) {
+                    // File is deleted on Mac, but database only has prior non-deleted snapshot versions.
+                    // Insert a synthesized .deleted event at the top of the timeline so deleted history is crystal clear!
+                    let latestPrior = vers.first
+                    let delDate = trackedFiles.first(where: { $0.logicalPath == path })?.lastTimestamp ?? Date()
+                    let delVerNum = (vers.map(\.versionNumber).max() ?? 0) + 1
+                    let deleteEntry = FileHistoryEntry(
+                        id: UUID(),
+                        sourceId: latestPrior?.sourceId ?? UUID(),
+                        logicalPath: path,
+                        originalFilename: latestPrior?.originalFilename ?? (path as NSString).lastPathComponent,
+                        timestamp: delDate,
+                        changeType: .deleted,
+                        fileSize: latestPrior?.fileSize ?? 0,
+                        sha256: latestPrior?.sha256 ?? "",
+                        historyRelativePath: latestPrior?.historyRelativePath ?? "",
+                        isCurrentVersion: true,
+                        versionNumber: delVerNum
+                    )
+                    for i in 0..<vers.count {
+                        vers[i].isCurrentVersion = false
+                    }
+                    vers.insert(deleteEntry, at: 0)
+                } else {
+                    // Database already has a .deleted version: ensure it links to the snapshot for preview & restore
+                    if let delIdx = vers.firstIndex(where: { $0.changeType == .deleted }) {
+                        vers[delIdx].isCurrentVersion = true
+                        for i in 0..<vers.count where i != delIdx {
+                            vers[i].isCurrentVersion = false
+                        }
+                        if vers[delIdx].historyRelativePath.isEmpty {
+                            if let nonDel = vers.first(where: { $0.changeType != .deleted && !$0.historyRelativePath.isEmpty }) {
+                                vers[delIdx].historyRelativePath = nonDel.historyRelativePath
+                                if vers[delIdx].fileSize == 0 {
+                                    vers[delIdx].fileSize = nonDel.fileSize
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
             self.fileVersions = vers
             self.selectedVersion = vers.first(where: { $0.isCurrentVersion }) ?? vers.first
         } catch {
@@ -489,7 +542,7 @@ public final class HistoryWindowViewModel: ObservableObject {
                 logicalPath: live.logicalPath,
                 originalFilename: live.originalFilename,
                 timestamp: live.lastTimestamp,
-                changeType: .created,
+                changeType: live.isDeleted ? .deleted : .created,
                 fileSize: liveSize,
                 sha256: "",
                 historyRelativePath: "",

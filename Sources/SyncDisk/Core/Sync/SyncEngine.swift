@@ -803,7 +803,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     // MARK: - Safe Restore
     
     public func restoreVersion(entry: FileHistoryEntry, toTargetURL: URL? = nil) async throws {
-        guard let source = config.sources.first(where: { $0.id == entry.sourceId }) else {
+        guard let source = config.sources.first(where: { $0.id == entry.sourceId })
+            ?? config.sources.first(where: { entry.logicalPath.hasPrefix($0.name + "/") || entry.logicalPath == $0.name }) else {
             throw NSError(domain: "SyncEngine", code: 404, userInfo: [NSLocalizedDescriptionKey: "Source folder not found for this version."])
         }
         
@@ -818,7 +819,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         }
         
-        let historyFileURL = storageManager.historyBaseURL.appendingPathComponent(entry.historyRelativePath)
+        // If entry is a deleted version or missing its history path, resolve snapshot from history
+        var fileRelPath = entry.historyRelativePath
+        if fileRelPath.isEmpty || entry.changeType == .deleted {
+            if let nonDel = try? database.history(for: entry.logicalPath).first(where: { $0.changeType != .deleted && !$0.historyRelativePath.isEmpty }) {
+                fileRelPath = nonDel.historyRelativePath
+            }
+        }
+        
+        let historyFileURL = storageManager.historyBaseURL.appendingPathComponent(fileRelPath)
         guard fileManager.fileExists(atPath: historyFileURL.path) else {
             throw StorageError.fileNotFound(historyFileURL.path)
         }
