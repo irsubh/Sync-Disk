@@ -117,7 +117,8 @@ public struct HistoricalInspectorView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 76, height: 66)
-                .shadow(color: Color.black.opacity(0.18), radius: 4, x: 0, y: 2)
+                .opacity(folder.isDeleted ? 0.6 : 1.0)
+                .shadow(color: Color.black.opacity(folder.isDeleted ? 0.08 : 0.18), radius: 4, x: 0, y: 2)
                 .padding(20)
             }
             .frame(maxWidth: .infinity)
@@ -126,6 +127,7 @@ public struct HistoricalInspectorView: View {
             VStack(alignment: .center, spacing: 3) {
                 Text(folder.name)
                     .font(.system(size: 14.5, weight: .semibold))
+                    .foregroundColor(folder.isDeleted ? .secondary : .primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 
@@ -142,11 +144,17 @@ public struct HistoricalInspectorView: View {
                         .truncationMode(.middle)
                 }
                 
-                Text(isRootView
-                    ? "\(syncEngine.config.sources.count) source\(syncEngine.config.sources.count == 1 ? "" : "s")"
-                    : "FOLDER · \(folder.itemCount) item\(folder.itemCount == 1 ? "" : "s")")
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary.opacity(0.8))
+                if folder.isDeleted {
+                    Text("FOLDER · DELETED · v\(folder.versionCount)")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(.red.opacity(0.85))
+                } else {
+                    Text(isRootView
+                        ? "\(syncEngine.config.sources.count) source\(syncEngine.config.sources.count == 1 ? "" : "s")"
+                        : "FOLDER · \(folder.itemCount) item\(folder.itemCount == 1 ? "" : "s") · v\(folder.versionCount)")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary.opacity(0.8))
+                }
             }
             .frame(maxWidth: .infinity)
         }
@@ -158,12 +166,31 @@ public struct HistoricalInspectorView: View {
         // SCROLLABLE DETAILS
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if folder.isDeleted {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(.orange)
+                        
+                        Text("This folder was removed from your source drive. Historical files remain protected.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.orange.opacity(0.08))
+                    )
+                }
+                
                 VStack(alignment: .leading, spacing: 10) {
                     Text("INFORMATION")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary.opacity(0.7))
                     
                     VStack(spacing: 7) {
+                        detailRow(label: "Status", value: folder.isDeleted ? "Deleted from disk" : "Active")
+                        detailRow(label: "Version", value: "v\(folder.versionCount)")
                         detailRow(label: "Items", value: "\(folder.itemCount)")
                         detailRow(label: "Last Modified", value: fullDateTimeString(folder.lastTimestamp))
                         if isRootView {
@@ -181,9 +208,13 @@ public struct HistoricalInspectorView: View {
                             .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
                     )
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
+                
+                if !isRootView {
+                    folderTimelineSection(folder: folder)
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
             .padding(.bottom, 16)
         }
         
@@ -201,18 +232,155 @@ public struct HistoricalInspectorView: View {
                 
                 Spacer()
                 
-                Button(action: {
-                    onOpenFolder(folder.path)
-                }) {
-                    Text("Open Folder")
-                        .font(.system(size: 11, weight: .medium))
+                if folder.isDeleted {
+                    Button(action: {
+                        Task {
+                            try? await syncEngine.restoreFolder(path: folder.path)
+                        }
+                    }) {
+                        Label("Restore Folder", systemImage: "arrow.counterclockwise")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                } else {
+                    Button(action: {
+                        onOpenFolder(folder.path)
+                    }) {
+                        Text("Open Folder")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(Color(nsColor: .textBackgroundColor))
+        }
+    }
+    
+    private struct FolderDayGroup {
+        let dateLabel: String
+        let entries: [FolderHistoryVersion]
+    }
+    
+    private func groupFolderVersionsByDay(_ versions: [FolderHistoryVersion]) -> [FolderDayGroup] {
+        let cal = Calendar.current
+        let groups = Dictionary(grouping: versions) { ver in
+            cal.startOfDay(for: ver.timestamp)
+        }
+        
+        let sortedDays = groups.keys.sorted(by: >)
+        return sortedDays.map { dayDate in
+            let label: String
+            if cal.isDateInToday(dayDate) {
+                label = "Today"
+            } else if cal.isDateInYesterday(dayDate) {
+                label = "Yesterday"
+            } else {
+                let fmt = DateFormatter()
+                fmt.dateStyle = .medium
+                fmt.timeStyle = .none
+                label = fmt.string(from: dayDate)
+            }
+            let sortedEntries = (groups[dayDate] ?? []).sorted(by: { $0.timestamp > $1.timestamp })
+            return FolderDayGroup(dateLabel: label, entries: sortedEntries)
+        }
+    }
+    
+    @ViewBuilder
+    private func folderTimelineSection(folder: FolderDisplayItem) -> some View {
+        let versions = syncEngine.database.folderHistory(for: folder.path)
+        if !versions.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("FOLDER HISTORY")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary.opacity(0.7))
+                
+                let grouped = groupFolderVersionsByDay(versions)
+                
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(grouped, id: \.dateLabel) { group in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(group.dateLabel.uppercased())
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.secondary.opacity(0.6))
+                            
+                            VStack(spacing: 0) {
+                                ForEach(Array(group.entries.enumerated()), id: \.element.id) { index, ver in
+                                    let isLast = index == group.entries.count - 1
+                                    
+                                    HStack(alignment: .top, spacing: 10) {
+                                        // Dot & vertical line
+                                        VStack(spacing: 0) {
+                                            if ver.isCurrentVersion {
+                                                Circle()
+                                                    .fill(ver.changeType == .deleted ? Color.red : Color.green)
+                                                    .frame(width: 7, height: 7)
+                                                    .padding(.top, 4)
+                                            } else if ver.changeType == .deleted {
+                                                Circle()
+                                                    .fill(Color.red)
+                                                    .frame(width: 7, height: 7)
+                                                    .padding(.top, 4)
+                                            } else {
+                                                Circle()
+                                                    .strokeBorder(Color.secondary.opacity(0.65), lineWidth: 1.5)
+                                                    .frame(width: 7, height: 7)
+                                                    .padding(.top, 4)
+                                            }
+                                            
+                                            if !isLast {
+                                                Rectangle()
+                                                    .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                                                    .frame(width: 1)
+                                                    .frame(minHeight: 28)
+                                            }
+                                        }
+                                        .frame(width: 12)
+                                        
+                                        // Content
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack {
+                                                Text(timeString(ver.timestamp))
+                                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                                    .foregroundColor(.primary)
+                                                
+                                                Spacer()
+                                                
+                                                Text("v\(ver.versionNumber)")
+                                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                                    .foregroundColor(.secondary)
+                                                    .padding(.horizontal, 5)
+                                                    .padding(.vertical, 1.5)
+                                                    .background(
+                                                        Capsule()
+                                                            .fill(Color(nsColor: .separatorColor).opacity(0.2))
+                                                    )
+                                            }
+                                            
+                                            HStack(spacing: 6) {
+                                                Text(ver.changeType.rawValue.capitalized)
+                                                    .font(.system(size: 11, weight: .medium))
+                                                    .foregroundColor(ver.changeType == .deleted ? .red : (ver.isCurrentVersion ? .green : .secondary))
+                                                
+                                                Text("·")
+                                                    .foregroundColor(.secondary.opacity(0.4))
+                                                
+                                                Text("\(ver.itemCount) item\(ver.itemCount == 1 ? "" : "s")")
+                                                    .font(.system(size: 11))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 public struct FileListView: View {
     public let items: [FileManagerGridItem]
     @Binding public var selectedFilePath: String?
+    public let syncEngine: SyncEngine?
     public let onSelectFile: (String) -> Void
     public let onSelectFolder: (FolderDisplayItem) -> Void
     public let onOpenFolder: (String) -> Void
@@ -13,6 +14,7 @@ public struct FileListView: View {
     public init(
         items: [FileManagerGridItem],
         selectedFilePath: Binding<String?>,
+        syncEngine: SyncEngine? = nil,
         onSelectFile: @escaping (String) -> Void,
         onSelectFolder: @escaping (FolderDisplayItem) -> Void = { _ in },
         onOpenFolder: @escaping (String) -> Void = { _ in },
@@ -20,6 +22,7 @@ public struct FileListView: View {
     ) {
         self.items = items
         self._selectedFilePath = selectedFilePath
+        self.syncEngine = syncEngine
         self.onSelectFile = onSelectFile
         self.onSelectFolder = onSelectFolder
         self.onOpenFolder = onOpenFolder
@@ -30,10 +33,12 @@ public struct FileListView: View {
     public init(
         files: [TrackedFileInfo],
         selectedFilePath: Binding<String?>,
+        syncEngine: SyncEngine? = nil,
         onSelectFile: @escaping (String) -> Void
     ) {
         self.items = files.map { FileManagerGridItem.file($0) }
         self._selectedFilePath = selectedFilePath
+        self.syncEngine = syncEngine
         self.onSelectFile = onSelectFile
         self.onSelectFolder = { _ in }
         self.onOpenFolder = { _ in }
@@ -73,6 +78,7 @@ public struct FileListView: View {
                             FileRowView(
                                 file: file,
                                 isSelected: isSelected,
+                                syncEngine: syncEngine,
                                 onSelect: {
                                     selectedFilePath = file.logicalPath
                                     onSelectFile(file.logicalPath)
@@ -94,6 +100,7 @@ public struct FileListView: View {
 }
 
 private final class RowClickState: ObservableObject {
+    @Published var thumbnailImage: NSImage? = nil
     var lastClickTime: Date = Date.distantPast
 }
 
@@ -118,22 +125,54 @@ private struct FolderRowView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 28, height: 28)
+                    .opacity(folder.isDeleted ? 0.6 : 1.0)
             }
             
             VStack(alignment: .leading, spacing: 3) {
                 Text(folder.name)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                    .foregroundColor(.primary)
+                    .foregroundColor(folder.isDeleted ? .secondary : .primary)
                     .lineLimit(1)
                 
-                Text("\(folder.itemCount) item\(folder.itemCount == 1 ? "" : "s")")
+                Text(folder.isDeleted ? "Deleted" : "\(folder.itemCount) item\(folder.itemCount == 1 ? "" : "s")")
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(folder.isDeleted ? .red.opacity(0.85) : .secondary)
                     .lineLimit(1)
             }
             .layoutPriority(1)
             
             Spacer(minLength: 6)
+            
+            // Status / Version Capsules
+            HStack(spacing: 4) {
+                if folder.isDeleted {
+                    Text("Deleted")
+                        .font(.system(size: 9, weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundColor(.red.opacity(0.9))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(
+                            Capsule()
+                                .fill(Color.red.opacity(0.12))
+                        )
+                }
+                if folder.versionCount > 0 {
+                    Text("v\(folder.versionCount)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundColor(isSelected ? .primary : .secondary.opacity(0.85))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(
+                            Capsule()
+                                .fill(isSelected ? Color.primary.opacity(0.1) : Color(nsColor: .separatorColor).opacity(0.25))
+                        )
+                }
+            }
+            .layoutPriority(10)
             
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .semibold))
@@ -163,6 +202,7 @@ private struct FolderRowView: View {
 private struct FileRowView: View {
     let file: TrackedFileInfo
     let isSelected: Bool
+    let syncEngine: SyncEngine?
     let onSelect: () -> Void
     let onOpen: () -> Void
     
@@ -188,8 +228,8 @@ private struct FileRowView: View {
     }
     
     private var fileIconImage: NSImage {
-        if let cached = ThumbnailCache.shared.cachedThumbnail(for: file.logicalPath) {
-            return cached
+        if let thumb = clickState.thumbnailImage ?? ThumbnailCache.shared.cachedThumbnail(for: file.logicalPath) {
+            return thumb
         }
         let icon: NSImage
         if let uti = UTType(filenameExtension: ext) {
@@ -203,16 +243,23 @@ private struct FileRowView: View {
     
     var body: some View {
         HStack(spacing: 12) {
-            // Native macOS Icon
+            // Native macOS Icon / Thumbnail
             ZStack {
-                Image(nsImage: fileIconImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 28, height: 28)
-                    .opacity(file.isCurrentDeleted ? 0.5 : 1.0)
+                if let thumb = clickState.thumbnailImage ?? ThumbnailCache.shared.cachedThumbnail(for: file.logicalPath) {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 28, height: 28)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .opacity(file.isCurrentDeleted ? 0.6 : 1.0)
+                } else {
+                    Image(nsImage: fileIconImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .opacity(file.isCurrentDeleted ? 0.5 : 1.0)
+                }
             }
-            .frame(width: 32, height: 32)
-            
             // Name & Path
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayName)
@@ -231,21 +278,21 @@ private struct FileRowView: View {
             
             Spacer(minLength: 6)
             
-            // Status / Version Capsule
-            if file.isCurrentDeleted {
-                Text("Deleted")
-                    .font(.system(size: 9, weight: .semibold))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .foregroundColor(.red.opacity(0.9))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2.5)
-                    .background(
-                        Capsule()
-                            .fill(Color.red.opacity(0.12))
-                    )
-                    .layoutPriority(10)
-            } else {
+            // Status / Version Capsules
+            HStack(spacing: 4) {
+                if file.isCurrentDeleted {
+                    Text("Deleted")
+                        .font(.system(size: 9, weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundColor(.red.opacity(0.9))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(
+                            Capsule()
+                                .fill(Color.red.opacity(0.12))
+                        )
+                }
                 Text("v\(file.versionCount)")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .lineLimit(1)
@@ -257,8 +304,8 @@ private struct FileRowView: View {
                         Capsule()
                             .fill(isSelected ? Color.primary.opacity(0.1) : Color(nsColor: .separatorColor).opacity(0.25))
                     )
-                    .layoutPriority(10)
             }
+            .layoutPriority(10)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -276,6 +323,31 @@ private struct FileRowView: View {
             } else {
                 clickState.lastClickTime = now
                 onSelect()
+            }
+        }
+        .task(id: file.logicalPath) {
+            if let cached = ThumbnailCache.shared.cachedThumbnail(for: file.logicalPath) {
+                self.clickState.thumbnailImage = cached
+                return
+            }
+            guard let engine = syncEngine else { return }
+            var targetURL = engine.resolveURL(for: file.logicalPath)
+            if targetURL == nil {
+                if let versions = try? engine.database.history(for: file.logicalPath) {
+                    if let latest = versions.first(where: { !$0.historyRelativePath.isEmpty }) {
+                        let snapURL = engine.storageManager.historyBaseURL.appendingPathComponent(latest.historyRelativePath)
+                        if FileManager.default.fileExists(atPath: snapURL.path) {
+                            targetURL = snapURL
+                        } else if let extracted = try? engine.storageManager.extractHistoricalFile(entry: latest) {
+                            targetURL = extracted
+                        }
+                    }
+                }
+            }
+            guard let finalURL = targetURL else { return }
+            let (img, _) = await ThumbnailCache.shared.loadThumbnail(for: finalURL, cacheKey: file.logicalPath, maxPixelSize: 64)
+            if !Task.isCancelled, let img = img {
+                self.clickState.thumbnailImage = img
             }
         }
     }

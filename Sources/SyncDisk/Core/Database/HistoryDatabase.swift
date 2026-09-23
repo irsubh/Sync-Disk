@@ -32,6 +32,35 @@ public struct TrackedFileInfo: Identifiable, Hashable, Sendable {
     }
 }
 
+public struct FolderHistoryVersion: Identifiable, Hashable, Sendable {
+    public var id: String { "\(path)_\(versionNumber)" }
+    public let path: String
+    public let name: String
+    public let timestamp: Date
+    public let changeType: ChangeType
+    public let itemCount: Int
+    public let versionNumber: Int
+    public let isCurrentVersion: Bool
+    
+    public init(
+        path: String,
+        name: String,
+        timestamp: Date,
+        changeType: ChangeType,
+        itemCount: Int,
+        versionNumber: Int,
+        isCurrentVersion: Bool
+    ) {
+        self.path = path
+        self.name = name
+        self.timestamp = timestamp
+        self.changeType = changeType
+        self.itemCount = itemCount
+        self.versionNumber = versionNumber
+        self.isCurrentVersion = isCurrentVersion
+    }
+}
+
 public enum FileFilter: String, CaseIterable, Sendable {
     case all = "All Files"
     case active = "Active"
@@ -561,6 +590,87 @@ public final class HistoryDatabase: @unchecked Sendable {
                 items: items
             )
         }
+    }
+    
+    public func versionCount(forFolder path: String) -> Int {
+        return queue.sync {
+            let hist = folderHistoryLocked(for: path)
+            return max(1, hist.count)
+        }
+    }
+    
+    public func folderHistory(for path: String) -> [FolderHistoryVersion] {
+        return queue.sync {
+            return folderHistoryLocked(for: path)
+        }
+    }
+    
+    private func folderHistoryLocked(for path: String) -> [FolderHistoryVersion] {
+        let cleanPrefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanPrefix.isEmpty else { return [] }
+        let prefix = cleanPrefix + "/"
+        let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
+        
+        var folderEntries: [FileHistoryEntry] = []
+        for (logicalPath, vers) in versionsByPath where logicalPath.hasPrefix(prefix) {
+            folderEntries.append(contentsOf: vers)
+        }
+        
+        guard !folderEntries.isEmpty else {
+            return [
+                FolderHistoryVersion(
+                    path: cleanPrefix,
+                    name: folderName,
+                    timestamp: Date(),
+                    changeType: .created,
+                    itemCount: 0,
+                    versionNumber: 1,
+                    isCurrentVersion: true
+                )
+            ]
+        }
+        
+        let sortedEntries = folderEntries.sorted(by: { $0.timestamp < $1.timestamp })
+        var distinctDates: [Date] = []
+        for entry in sortedEntries {
+            if let last = distinctDates.last {
+                if abs(entry.timestamp.timeIntervalSince(last)) > 2.0 {
+                    distinctDates.append(entry.timestamp)
+                }
+            } else {
+                distinctDates.append(entry.timestamp)
+            }
+        }
+        
+        var result: [FolderHistoryVersion] = []
+        for (idx, date) in distinctDates.enumerated() {
+            let verNum = idx + 1
+            var activeCount = 0
+            var allDeleted = true
+            for (logicalPath, vers) in versionsByPath where logicalPath.hasPrefix(prefix) {
+                if let latestAtDate = vers.filter({ $0.timestamp <= date }).sorted(by: { $0.timestamp > $1.timestamp }).first {
+                    if latestAtDate.changeType != .deleted {
+                        activeCount += 1
+                        allDeleted = false
+                    }
+                }
+            }
+            
+            let changeType: ChangeType = allDeleted ? .deleted : (idx == 0 ? .created : .modified)
+            let isCurrent = (idx == distinctDates.count - 1)
+            
+            result.append(FolderHistoryVersion(
+                path: cleanPrefix,
+                name: folderName,
+                timestamp: date,
+                changeType: changeType,
+                itemCount: activeCount,
+                versionNumber: verNum,
+                isCurrentVersion: isCurrent
+            ))
+        }
+        
+        return result.reversed()
     }
     
     private func buildSnapshotTree(for entries: [FileHistoryEntry], relativeTo prefix: String) -> [FolderSnapshotItem] {

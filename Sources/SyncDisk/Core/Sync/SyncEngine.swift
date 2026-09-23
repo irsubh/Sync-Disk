@@ -869,6 +869,32 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
     }
     
+    /// Restores all files belonging to a historical or deleted folder back to the live source folder.
+    public func restoreFolder(path: String) async throws {
+        let cleanPrefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanPrefix.isEmpty else { return }
+        let prefix = cleanPrefix + "/"
+        
+        let allFiles = try database.allTrackedFiles(filter: .all)
+        let folderFiles = allFiles.filter { $0.logicalPath.hasPrefix(prefix) }
+        
+        var restoredCount = 0
+        for file in folderFiles {
+            let vers = try database.history(for: file.logicalPath)
+            if let latestNonDeleted = vers.first(where: { $0.changeType != .deleted && !$0.historyRelativePath.isEmpty }) {
+                try await restoreVersion(entry: latestNonDeleted)
+                restoredCount += 1
+            }
+        }
+        
+        let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
+        let count = restoredCount
+        await MainActor.run {
+            self.syncProgress.statusDescription = "Restored folder '\(folderName)' (\(count) files)"
+            self.refreshDiskStatus()
+        }
+    }
+    
     // MARK: - Reconciliation Scan (Authoritative Source of Truth)
     
     /// Periodically checks (every 5s, ~0% CPU) whether the destination mirror folders still exist.
@@ -1208,6 +1234,28 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         let directHist = historyBase.appendingPathComponent(logicalPath)
         if fm.fileExists(atPath: directHist.path) {
             return directHist
+        }
+        
+        // 4. Check historical snapshot versions in database (find the most recent existing snapshot file)
+        if let versions = try? database.history(for: logicalPath) {
+            for ver in versions where !ver.historyRelativePath.isEmpty {
+                let snapURL = storageManager.historyBaseURL.appendingPathComponent(ver.historyRelativePath)
+                if fm.fileExists(atPath: snapURL.path) {
+                    return snapURL
+                }
+            }
+        }
+        
+        // 5. If it is a folder, check if it exists in any snapshot directory
+        let snapshotsDir = historyBase.appendingPathComponent("snapshots", isDirectory: true)
+        if let snapFolders = try? fm.contentsOfDirectory(atPath: snapshotsDir.path) {
+            for snapName in snapFolders.sorted(by: >) {
+                let candidate = snapshotsDir.appendingPathComponent(snapName).appendingPathComponent(logicalPath)
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                    return candidate
+                }
+            }
         }
         
         return nil

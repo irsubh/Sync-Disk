@@ -469,6 +469,64 @@ public final class HistoryWindowViewModel: ObservableObject {
         }
     }
     
+    public func isFolderDeleted(folderFullPath: String, syncEngine: SyncEngine) -> Bool {
+        let fm = FileManager.default
+        
+        // 1. Check live sources
+        var existsInSource = false
+        var checkedAnySource = false
+        for source in syncEngine.config.sources where source.isEnabled {
+            let prefix = source.name + "/"
+            if folderFullPath.hasPrefix(prefix) {
+                checkedAnySource = true
+                if fm.fileExists(atPath: source.url.path) {
+                    let sub = String(folderFullPath.dropFirst(prefix.count))
+                    let u = source.url.appendingPathComponent(sub)
+                    var isDir: ObjCBool = false
+                    if fm.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue {
+                        existsInSource = true
+                        break
+                    }
+                }
+            } else if folderFullPath == source.name {
+                checkedAnySource = true
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: source.url.path, isDirectory: &isDir), isDir.boolValue {
+                    existsInSource = true
+                    break
+                }
+            }
+        }
+        
+        // 2. Check mirror destination
+        var existsInDestination = false
+        if let dest = syncEngine.config.syncDestination {
+            let u = dest.appendingPathComponent(folderFullPath)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue {
+                existsInDestination = true
+            }
+        }
+        
+        // If checked against an accessible source and does not exist in that source, it's deleted locally!
+        if checkedAnySource && !existsInSource {
+            return true
+        }
+        
+        // If it exists in neither live sources nor mirror destination, it's deleted
+        if !existsInSource && !existsInDestination {
+            return true
+        }
+        
+        // If all known files inside this folder in history are marked deleted, then the folder is deleted
+        let filesInFolder = trackedFiles.filter { $0.logicalPath.hasPrefix(folderFullPath + "/") }
+        if !filesInFolder.isEmpty && !filesInFolder.contains(where: { !$0.isDeleted }) {
+            return true
+        }
+        
+        return false
+    }
+
     public func currentFolderDisplayItem(syncEngine: SyncEngine) -> FolderDisplayItem? {
         if let folder = selectedFolder {
             return folder
@@ -487,7 +545,9 @@ public final class HistoryWindowViewModel: ObservableObject {
                 name: "All Files",
                 path: "",
                 itemCount: syncEngine.config.sources.count,
-                lastTimestamp: trackedFiles.first?.lastTimestamp ?? Date()
+                lastTimestamp: trackedFiles.first?.lastTimestamp ?? Date(),
+                isDeleted: false,
+                versionCount: 1
             )
         }
         
@@ -524,11 +584,16 @@ public final class HistoryWindowViewModel: ObservableObject {
         if latestDate == Date.distantPast { latestDate = Date() }
         let count = subfolders.count + directFiles
         
+        let isDeleted = isFolderDeleted(folderFullPath: currentPath, syncEngine: syncEngine)
+        let verCount = max(1, syncEngine.database.versionCount(forFolder: currentPath))
+        
         return FolderDisplayItem(
             name: folderName,
             path: currentPath,
             itemCount: count,
-            lastTimestamp: latestDate
+            lastTimestamp: latestDate,
+            isDeleted: isDeleted,
+            versionCount: verCount
         )
     }
     
@@ -656,7 +721,7 @@ public final class HistoryWindowViewModel: ObservableObject {
         // A child of folder F is:
         // - Any unique immediate subfolder name directly inside F
         // - Any file directly inside F
-        var folderInfo: [String: (itemCount: Int, lastTimestamp: Date)] = [:]
+        var folderInfo: [String: (itemCount: Int, lastTimestamp: Date, isDeleted: Bool, versionCount: Int)] = [:]
         
         for folderName in immediateFolderNames {
             let folderFullPath = basePrefix.isEmpty ? folderName : "\(basePrefix)/\(folderName)"
@@ -703,11 +768,28 @@ public final class HistoryWindowViewModel: ObservableObject {
             
             let totalChildren = subfolderNames.count + directFileCount
             if latestDate == Date.distantPast { latestDate = Date() }
-            folderInfo[folderName] = (itemCount: totalChildren, lastTimestamp: latestDate)
+            
+            let isDeleted = isFolderDeleted(folderFullPath: folderFullPath, syncEngine: syncEngine)
+            let verCount = max(1, syncEngine.database.versionCount(forFolder: folderFullPath))
+            
+            folderInfo[folderName] = (
+                itemCount: totalChildren,
+                lastTimestamp: latestDate,
+                isDeleted: isDeleted,
+                versionCount: verCount
+            )
+        }
+        
+        // Filter out deleted folders when viewing Active files only
+        let filteredFolderNames = immediateFolderNames.filter { folderName in
+            if sidebarSelection == .activeOnly {
+                return !(folderInfo[folderName]?.isDeleted ?? false)
+            }
+            return true
         }
         
         // Step 3: Sort folders according to sortOption
-        let sortedFolderNames = immediateFolderNames.sorted { f1, f2 in
+        let sortedFolderNames = filteredFolderNames.sorted { f1, f2 in
             switch sortOption {
             case .dateModified, .dateAdded, .dateCreated, .dateLastOpened:
                 let t1 = folderInfo[f1]?.lastTimestamp ?? Date.distantPast
@@ -728,12 +810,14 @@ public final class HistoryWindowViewModel: ObservableObject {
         var result: [FileManagerGridItem] = []
         for name in sortedFolderNames {
             let folderFullPath = basePrefix.isEmpty ? name : "\(basePrefix)/\(name)"
-            let info = folderInfo[name] ?? (itemCount: 0, lastTimestamp: Date())
+            let info = folderInfo[name] ?? (itemCount: 0, lastTimestamp: Date(), isDeleted: false, versionCount: 1)
             let item = FolderDisplayItem(
                 name: name,
                 path: folderFullPath,
                 itemCount: info.itemCount,
-                lastTimestamp: info.lastTimestamp
+                lastTimestamp: info.lastTimestamp,
+                isDeleted: info.isDeleted,
+                versionCount: info.versionCount
             )
             result.append(.folder(item))
         }
@@ -950,6 +1034,7 @@ public struct HistoryWindowView: View {
                                     FileListView(
                                         items: vm.displayedItems,
                                         selectedFilePath: $vm.selectedFilePath,
+                                        syncEngine: syncEngine,
                                         onSelectFile: { path in
                                             vm.selectedFolder = nil
                                             vm.loadFileVersions(for: path, database: syncEngine.database, syncEngine: syncEngine)

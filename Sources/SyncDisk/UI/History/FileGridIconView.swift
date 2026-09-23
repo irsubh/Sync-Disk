@@ -8,12 +8,23 @@ public struct FolderDisplayItem: Identifiable, Hashable {
     public let path: String
     public let itemCount: Int
     public let lastTimestamp: Date
+    public let isDeleted: Bool
+    public let versionCount: Int
     
-    public init(name: String, path: String, itemCount: Int, lastTimestamp: Date) {
+    public init(
+        name: String,
+        path: String,
+        itemCount: Int,
+        lastTimestamp: Date,
+        isDeleted: Bool = false,
+        versionCount: Int = 1
+    ) {
         self.name = name
         self.path = path
         self.itemCount = itemCount
         self.lastTimestamp = lastTimestamp
+        self.isDeleted = isDeleted
+        self.versionCount = versionCount
     }
 }
 
@@ -152,20 +163,38 @@ private struct FolderGridCard: View {
     
     var body: some View {
         VStack(spacing: 5) {
-            // Folder Icon - Genuine macOS 3D Folder Icon
-            ZStack {
+            // Folder Icon - Genuine macOS 3D Folder Icon with subtle version badge
+            ZStack(alignment: .topTrailing) {
                 Image(nsImage: Self.retinaFolderIcon)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 58, height: 50)
-                    .shadow(color: Color.black.opacity(0.14), radius: 2.5, x: 0, y: 1.5)
+                    .opacity(folder.isDeleted ? 0.6 : 1.0)
+                    .shadow(color: Color.black.opacity(folder.isDeleted ? 0.04 : 0.14), radius: 2.5, x: 0, y: 1.5)
+                
+                if folder.versionCount > 0 {
+                    Text("v\(folder.versionCount)")
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(folder.isDeleted ? .red.opacity(0.9) : .secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule()
+                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+                                .overlay(
+                                    Capsule()
+                                        .stroke(folder.isDeleted ? Color.red.opacity(0.3) : Color.primary.opacity(0.12), lineWidth: 0.5)
+                                )
+                        )
+                        .offset(x: 4, y: -4)
+                }
             }
             .frame(width: 64, height: 60)
             
             // Name
             Text(folder.name)
                 .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? .white : .primary)
+                .foregroundColor(isSelected ? .white : (folder.isDeleted ? .secondary : .primary))
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
                 .truncationMode(.middle)
@@ -176,10 +205,10 @@ private struct FolderGridCard: View {
                         .fill(isSelected ? Color.accentColor : Color.clear)
                 )
             
-            // Subtitle
-            Text("\(folder.itemCount) item\(folder.itemCount == 1 ? "" : "s")")
+            // Subtitle (Deleted in red or Item count)
+            Text(folder.isDeleted ? "Deleted" : "\(folder.itemCount) item\(folder.itemCount == 1 ? "" : "s")")
                 .font(.system(size: 10))
-                .foregroundColor(.secondary)
+                .foregroundColor(folder.isDeleted ? .red.opacity(0.85) : .secondary)
                 .lineLimit(1)
         }
         .frame(width: 110)
@@ -248,35 +277,59 @@ private struct FileGridCard: View {
     var body: some View {
         VStack(spacing: 5) {
             // Thumbnail / Icon (Genuine Mac App Icon, Raster Squircle, or macOS System Icon)
-            ZStack {
-                if let thumb = state.thumbnailImage {
-                    if isAppBundle {
-                        Image(nsImage: thumb)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 58, height: 58)
-                            .shadow(color: Color.black.opacity(0.14), radius: 2.5, x: 0, y: 1.5)
-                    } else if isRasterImage {
-                        Image(nsImage: thumb)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 58, height: 58)
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
-                            )
-                            .shadow(color: Color.black.opacity(0.10), radius: 2, x: 0, y: 1)
+            ZStack(alignment: .topTrailing) {
+                ZStack {
+                    if let thumb = state.thumbnailImage {
+                        if isAppBundle {
+                            Image(nsImage: thumb)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 58, height: 58)
+                                .opacity(file.isCurrentDeleted ? 0.65 : 1.0)
+                                .shadow(color: Color.black.opacity(file.isCurrentDeleted ? 0.04 : 0.14), radius: 2.5, x: 0, y: 1.5)
+                        } else if isRasterImage {
+                            Image(nsImage: thumb)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 58, height: 58)
+                                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                                )
+                                .opacity(file.isCurrentDeleted ? 0.65 : 1.0)
+                                .shadow(color: Color.black.opacity(file.isCurrentDeleted ? 0.04 : 0.10), radius: 2, x: 0, y: 1)
+                        } else {
+                            Image(nsImage: thumb)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 54, height: 54)
+                                .opacity(file.isCurrentDeleted ? 0.65 : 1.0)
+                                .shadow(color: Color.black.opacity(file.isCurrentDeleted ? 0.04 : 0.10), radius: 1.5, x: 0, y: 1)
+                        }
                     } else {
-                        Image(nsImage: thumb)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 54, height: 54)
-                            .shadow(color: Color.black.opacity(0.10), radius: 1.5, x: 0, y: 1)
+                        fileTypeIcon
+                            .frame(width: 58, height: 58)
+                            .opacity(file.isCurrentDeleted ? 0.6 : 1.0)
                     }
-                } else {
-                    fileTypeIcon
-                        .frame(width: 58, height: 58)
+                }
+                .frame(width: 64, height: 60)
+                
+                if file.versionCount > 0 {
+                    Text("v\(file.versionCount)")
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(file.isCurrentDeleted ? .red.opacity(0.9) : .secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule()
+                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+                                .overlay(
+                                    Capsule()
+                                        .stroke(file.isCurrentDeleted ? Color.red.opacity(0.3) : Color.primary.opacity(0.12), lineWidth: 0.5)
+                                )
+                        )
+                        .offset(x: 4, y: -4)
                 }
             }
             .frame(width: 64, height: 60)
@@ -377,11 +430,29 @@ private struct FileGridCard: View {
         }
         
         // Fast centralized resolve without directory enumeration
-        guard let targetURL = syncEngine.resolveURL(for: file.logicalPath) else { return }
+        var targetURL = syncEngine.resolveURL(for: file.logicalPath)
         
-        let (img, dims) = await ThumbnailCache.shared.loadThumbnail(for: targetURL, cacheKey: file.logicalPath)
+        // Fallback: check historical snapshot versions in database
+        if targetURL == nil {
+            if let versions = try? syncEngine.database.history(for: file.logicalPath) {
+                if let latest = versions.first(where: { !$0.historyRelativePath.isEmpty }) {
+                    let snapURL = syncEngine.storageManager.historyBaseURL.appendingPathComponent(latest.historyRelativePath)
+                    if FileManager.default.fileExists(atPath: snapURL.path) {
+                        targetURL = snapURL
+                    } else if let extracted = try? syncEngine.storageManager.extractHistoricalFile(entry: latest) {
+                        targetURL = extracted
+                    }
+                }
+            }
+        }
+        
+        guard let finalURL = targetURL else { return }
+        
+        let (img, dims) = await ThumbnailCache.shared.loadThumbnail(for: finalURL, cacheKey: file.logicalPath)
         guard !Task.isCancelled else { return }
-        state.thumbnailImage = img
-        state.dimensionSubtitle = dims
+        if let img = img {
+            state.thumbnailImage = img
+            state.dimensionSubtitle = dims
+        }
     }
 }
