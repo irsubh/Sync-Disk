@@ -11,6 +11,7 @@ public enum StorageError: LocalizedError {
     case diskFullOrUnavailable
     case atomicWriteFailed(String)
     case restoreFailed(String)
+    case internalStorageProhibited(String)
     
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ public enum StorageError: LocalizedError {
             return "Atomic write failed: \(msg)"
         case .restoreFailed(let msg):
             return "Restore failed: \(msg)"
+        case .internalStorageProhibited(let msg):
+            return "Internal storage prohibited: \(msg)"
         }
     }
 }
@@ -34,13 +37,53 @@ public final class HistoryStorageManager: @unchecked Sendable {
     public let historyBaseURL: URL
     private let fileManager = FileManager.default
     
+    /// Validates whether a given URL is strictly prohibited internal boot/Application Support storage.
+    public static func isForbiddenInternalStorage(url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        
+        // 1. Explicitly forbid Application Support, Library, or user profile locations
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.standardizedFileURL.path ?? ""
+        let libDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.standardizedFileURL.path ?? ""
+        
+        if (!appSupport.isEmpty && path.hasPrefix(appSupport)) ||
+           (!libDir.isEmpty && path.hasPrefix(libDir)) ||
+           path.contains("/Library/Application Support/") ||
+           path.contains("HistoryFallback") {
+            return true
+        }
+        
+        // 2. Allow temporary directory during automated unit testing (XCTest)
+        let isTemp = path.hasPrefix("/tmp") || path.hasPrefix("/private/var/folders") || path.hasPrefix("/private/tmp") || path.hasPrefix("/var/folders")
+        if isTemp {
+            return false
+        }
+        
+        // 3. For all production usage, the path MUST reside under an external volume (/Volumes/<Name>) and NOT Macintosh HD or root
+        if !path.hasPrefix("/Volumes/") || path.hasPrefix("/Volumes/Macintosh HD") || path == "/" {
+            return true
+        }
+        
+        return false
+    }
+    
     public init(historyBaseURL: URL) {
         self.historyBaseURL = historyBaseURL
-        try? ensureDirectoryExists(at: historyBaseURL)
-        try? ensureDirectoryExists(at: historyBaseURL.appendingPathComponent("snapshots", isDirectory: true))
-        let neverIndex = historyBaseURL.appendingPathComponent(".metadata_never_index")
-        if !fileManager.fileExists(atPath: neverIndex.path) {
-            try? Data().write(to: neverIndex)
+        
+        // Guard against any initialization on internal storage
+        guard !Self.isForbiddenInternalStorage(url: historyBaseURL) else {
+            print("SyncDisk Error: Prohibited attempt to initialize HistoryStorageManager on internal storage: \(historyBaseURL.path)")
+            return
+        }
+        
+        // Only create directories if the parent directory exists (e.g. external volume is mounted)
+        let parentDir = historyBaseURL.deletingLastPathComponent().path
+        if fileManager.fileExists(atPath: parentDir) {
+            try? ensureDirectoryExists(at: historyBaseURL)
+            try? ensureDirectoryExists(at: historyBaseURL.appendingPathComponent("snapshots", isDirectory: true))
+            let neverIndex = historyBaseURL.appendingPathComponent(".metadata_never_index")
+            if !fileManager.fileExists(atPath: neverIndex.path) {
+                try? Data().write(to: neverIndex)
+            }
         }
     }
     
@@ -81,6 +124,9 @@ public final class HistoryStorageManager: @unchecked Sendable {
         timestamp: Date,
         database: HistoryDatabase? = nil
     ) throws -> (relativePath: String, sha256: String, size: Int64) {
+        guard !Self.isForbiddenInternalStorage(url: historyBaseURL) else {
+            throw StorageError.internalStorageProhibited("Backups and history snapshots must only be stored on external drives, never on internal storage: \(historyBaseURL.path)")
+        }
         guard fileManager.fileExists(atPath: sourceFileURL.path) else {
             throw StorageError.fileNotFound(sourceFileURL.path)
         }

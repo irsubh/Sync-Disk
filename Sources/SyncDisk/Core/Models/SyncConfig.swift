@@ -68,11 +68,37 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     
     public static func load() -> SyncConfig {
         let file = configFileURL
-        guard let data = try? Data(contentsOf: file),
-              let config = try? JSONDecoder().decode(SyncConfig.self, from: data) else {
-            return SyncConfig()
+        if let data = try? Data(contentsOf: file),
+           var config = try? JSONDecoder().decode(SyncConfig.self, from: data) {
+            // Auto-detect external SanDisk if destination is missing or accidentally set to internal storage
+            if config.syncDestination == nil || HistoryStorageManager.isForbiddenInternalStorage(url: config.syncDestination!) {
+                let sandisk = URL(fileURLWithPath: "/Volumes/SanDisk")
+                if FileManager.default.fileExists(atPath: sandisk.path) {
+                    config.syncDestination = sandisk
+                    try? config.save()
+                }
+            }
+            return config
         }
-        return config
+        
+        var defaultDest: URL? = nil
+        let sandisk = URL(fileURLWithPath: "/Volumes/SanDisk")
+        if FileManager.default.fileExists(atPath: sandisk.path) {
+            defaultDest = sandisk
+        }
+        
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let defaultSources = [
+            SyncSource(name: "Documents", url: home.appendingPathComponent("Documents")),
+            SyncSource(name: "Downloads", url: home.appendingPathComponent("Downloads"))
+        ]
+        
+        let initialConfig = SyncConfig(
+            sources: defaultSources,
+            syncDestination: defaultDest
+        )
+        try? initialConfig.save()
+        return initialConfig
     }
     
     public func save() throws {

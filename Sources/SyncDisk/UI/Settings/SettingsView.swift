@@ -43,9 +43,13 @@ public final class SettingsViewModel: ObservableObject {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Select Sync Destination"
+        panel.prompt = "Select External Sync Destination"
         
         if panel.runModal() == .OK, let url = panel.url {
+            if HistoryStorageManager.isForbiddenInternalStorage(url: url) {
+                recursionWarning = "Sync destination must be located on an external drive (/Volumes/...), never on internal Mac storage."
+                return
+            }
             config.syncDestination = url
             validateRecursion()
         }
@@ -56,9 +60,13 @@ public final class SettingsViewModel: ObservableObject {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Choose Backup History Folder"
+        panel.prompt = "Choose External Backup Folder"
         
         if panel.runModal() == .OK, let url = panel.url {
+            if HistoryStorageManager.isForbiddenInternalStorage(url: url) {
+                recursionWarning = "Backup history destination must be located on an external drive (/Volumes/...), never on internal Mac storage."
+                return
+            }
             customBackupURL = url
             useCustomBackup = true
             validateRecursion()

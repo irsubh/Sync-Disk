@@ -63,17 +63,31 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
     
     public init(config: SyncConfig? = nil, database: HistoryDatabase? = nil, autoStart: Bool = true) {
-        let effectiveConfig = config ?? SyncConfig.load()
+        var effectiveConfig = config ?? SyncConfig.load()
+        
+        // Auto-detect mounted external SanDisk drive if no destination is configured
+        if effectiveConfig.syncDestination == nil {
+            let sandiskURL = URL(fileURLWithPath: "/Volumes/SanDisk")
+            if FileManager.default.fileExists(atPath: sandiskURL.path) {
+                effectiveConfig.syncDestination = sandiskURL
+                try? effectiveConfig.save()
+            }
+        }
         self.config = effectiveConfig
         
-        let historyURL = effectiveConfig.effectiveHistoryURL ?? SyncConfig.configDirectory.appendingPathComponent("HistoryFallback")
+        // History location must ONLY ever be on the external drive (.backup).
+        // If destination drive is not connected/configured, use a safe unmounted external placeholder.
+        // NEVER use internal Application Support or fallback to local disk!
+        let historyURL = effectiveConfig.effectiveHistoryURL ?? URL(fileURLWithPath: "/Volumes/.NoExternalDiskConnected/.backup")
         self.storageManager = HistoryStorageManager(historyBaseURL: historyURL)
         self.database = database ?? HistoryDatabase(storageBaseURL: historyURL)
         
-        // Clean up any legacy SQLite database files from local Application Support (zero local DB)
+        // Clean up any legacy SQLite database files or old HistoryFallback folders from local Application Support (zero local backup data)
         Self.cleanupLegacyLocalDatabases()
-        // Clean up any legacy .store folder from storage
-        try? FileManager.default.removeItem(at: historyURL.appendingPathComponent(".store"))
+        // Clean up any legacy .store folder from storage if mounted
+        if FileManager.default.fileExists(atPath: historyURL.path) {
+            try? FileManager.default.removeItem(at: historyURL.appendingPathComponent(".store"))
+        }
         
         setupMonitors()
         if autoStart {
@@ -84,7 +98,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     private static func cleanupLegacyLocalDatabases() {
         let dir = SyncConfig.configDirectory
         let fm = FileManager.default
-        let legacyNames = ["history.sqlite", "history.sqlite-wal", "history.sqlite-shm"]
+        let legacyNames = [
+            "history.sqlite",
+            "history.sqlite-wal",
+            "history.sqlite-shm",
+            "HistoryFallback",
+            "snapshots",
+            "history_index.json",
+            ".metadata_never_index"
+        ]
         for name in legacyNames {
             let u = dir.appendingPathComponent(name)
             if fm.fileExists(atPath: u.path) {
@@ -195,6 +217,12 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     public func updateHistoryLocationIfNeeded() {
         guard let dest = config.syncDestination, diskMonitor.isConnected else { return }
         let targetHistoryURL = config.effectiveHistoryURL ?? dest.appendingPathComponent(".backup", isDirectory: true)
+        
+        guard !HistoryStorageManager.isForbiddenInternalStorage(url: targetHistoryURL) else {
+            print("SyncDisk Error: Prohibited attempt to use internal storage for history: \(targetHistoryURL.path)")
+            return
+        }
+        
         if storageManager.historyBaseURL.standardizedFileURL.path != targetHistoryURL.standardizedFileURL.path {
             self.storageManager = HistoryStorageManager(historyBaseURL: targetHistoryURL)
             self.database = HistoryDatabase(storageBaseURL: targetHistoryURL)

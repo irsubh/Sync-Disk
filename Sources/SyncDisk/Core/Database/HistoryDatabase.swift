@@ -136,10 +136,17 @@ public final class HistoryDatabase: @unchecked Sendable {
             self.storageBaseURL = databaseURL.deletingPathExtension()
         }
         
-        try? ensureDirectoryExists(at: storageBaseURL.appendingPathComponent("snapshots", isDirectory: true))
-        let neverIndex = storageBaseURL.appendingPathComponent(".metadata_never_index")
-        if !fileManager.fileExists(atPath: neverIndex.path) {
-            try? Data().write(to: neverIndex)
+        guard !HistoryStorageManager.isForbiddenInternalStorage(url: storageBaseURL) else {
+            print("SyncDisk Error: Prohibited attempt to initialize HistoryDatabase on internal storage: \(storageBaseURL.path)")
+            return
+        }
+        
+        if fileManager.fileExists(atPath: storageBaseURL.deletingLastPathComponent().path) {
+            try? ensureDirectoryExists(at: storageBaseURL.appendingPathComponent("snapshots", isDirectory: true))
+            let neverIndex = storageBaseURL.appendingPathComponent(".metadata_never_index")
+            if !fileManager.fileExists(atPath: neverIndex.path) {
+                try? Data().write(to: neverIndex)
+            }
         }
         scanSnapshotsFromStorage()
     }
@@ -148,10 +155,17 @@ public final class HistoryDatabase: @unchecked Sendable {
         self.databaseURL = storageBaseURL
         self.storageBaseURL = storageBaseURL
         
-        try? ensureDirectoryExists(at: storageBaseURL.appendingPathComponent("snapshots", isDirectory: true))
-        let neverIndex = storageBaseURL.appendingPathComponent(".metadata_never_index")
-        if !fileManager.fileExists(atPath: neverIndex.path) {
-            try? Data().write(to: neverIndex)
+        guard !HistoryStorageManager.isForbiddenInternalStorage(url: storageBaseURL) else {
+            print("SyncDisk Error: Prohibited attempt to initialize HistoryDatabase on internal storage: \(storageBaseURL.path)")
+            return
+        }
+        
+        if fileManager.fileExists(atPath: storageBaseURL.deletingLastPathComponent().path) {
+            try? ensureDirectoryExists(at: storageBaseURL.appendingPathComponent("snapshots", isDirectory: true))
+            let neverIndex = storageBaseURL.appendingPathComponent(".metadata_never_index")
+            if !fileManager.fileExists(atPath: neverIndex.path) {
+                try? Data().write(to: neverIndex)
+            }
         }
         scanSnapshotsFromStorage()
     }
@@ -179,6 +193,7 @@ public final class HistoryDatabase: @unchecked Sendable {
         scheduledFlushWorkItem?.cancel()
         scheduledFlushWorkItem = nil
         guard isDirty else { return }
+        guard !HistoryStorageManager.isForbiddenInternalStorage(url: storageBaseURL) else { return }
         isDirty = false
         if let data = try? JSONEncoder().encode(versionsByPath) {
             try? data.write(to: indexFileURL, options: .atomic)
