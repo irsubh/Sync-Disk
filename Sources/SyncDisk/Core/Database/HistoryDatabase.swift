@@ -207,9 +207,12 @@ public final class HistoryDatabase: @unchecked Sendable {
         }
         
         let snapshotsDir = storageBaseURL.appendingPathComponent("snapshots", isDirectory: true)
-            guard let folderNames = try? fileManager.contentsOfDirectory(atPath: snapshotsDir.path) else {
-                return
-            }
+        guard let folderNames = try? fileManager.contentsOfDirectory(atPath: snapshotsDir.path), !folderNames.isEmpty else {
+            self.versionsByPath = [:]
+            self.snapshotsByDate = [:]
+            self.isIndexLoaded = true
+            return
+        }
             
             let df = DateFormatter()
             df.dateFormat = "yyyy-MM-dd_HH-mm-ss"

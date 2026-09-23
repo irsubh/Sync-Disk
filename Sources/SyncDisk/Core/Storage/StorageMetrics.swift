@@ -53,7 +53,10 @@ public final class StorageMetrics: @unchecked Sendable {
         var freeSpace: Int64 = 0
         var volumeName = dest.lastPathComponent
         
-        if let values = try? dest.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeNameKey]) {
+        var destURL = dest
+        destURL.removeAllCachedResourceValues()
+        
+        if let values = try? destURL.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeNameKey]) {
             totalSpace = Int64(values.volumeTotalCapacity ?? 0)
             if let avail = values.volumeAvailableCapacity {
                 freeSpace = Int64(avail)
@@ -71,36 +74,53 @@ public final class StorageMetrics: @unchecked Sendable {
         var historySize: Int64 = 0
         let now = Date()
         
-        let shouldDeepScan = forceDeepScan || (cachedSyncedSize == 0 && now.timeIntervalSince(lastFullScanDate) > 300)
+        // Fast live check: Check if destination actually contains any of the configured mirror folders
+        let hasAnyMirrorFolder = sources.contains { source in
+            fileManager.fileExists(atPath: dest.appendingPathComponent(source.name, isDirectory: true).path)
+        }
+        let hasHistoryFolder = fileManager.fileExists(atPath: historyURL.appendingPathComponent("snapshots", isDirectory: true).path)
+        
+        metricsLock.lock()
+        if !hasAnyMirrorFolder {
+            cachedSyncedSize = 0
+        }
+        if !hasHistoryFolder {
+            cachedHistorySize = 0
+        }
+        syncedSize = cachedSyncedSize
+        historySize = cachedHistorySize
+        metricsLock.unlock()
+        
+        let shouldDeepScan = forceDeepScan || (hasAnyMirrorFolder && syncedSize == 0 && now.timeIntervalSince(lastFullScanDate) > 60)
         
         if shouldDeepScan {
             if !sources.isEmpty {
                 for source in sources where source.isEnabled {
                     let sourceDest = dest.appendingPathComponent(source.name, isDirectory: true)
-                    syncedSize += await calculateDirectorySize(at: sourceDest, excludingSubdirectory: nil)
+                    if fileManager.fileExists(atPath: sourceDest.path) {
+                        syncedSize += await calculateDirectorySize(at: sourceDest, excludingSubdirectory: nil)
+                    }
                 }
             } else {
                 syncedSize = await calculateDirectorySize(at: dest, excludingSubdirectory: historyURL)
             }
-            historySize = await calculateDirectorySize(at: historyURL, excludingSubdirectory: nil)
+            
+            if hasHistoryFolder {
+                historySize = await calculateDirectorySize(at: historyURL, excludingSubdirectory: nil)
+            } else {
+                historySize = 0
+            }
             
             metricsLock.lock()
             cachedSyncedSize = syncedSize
             cachedHistorySize = historySize
             lastFullScanDate = now
             metricsLock.unlock()
-        } else {
+        } else if hasAnyMirrorFolder && syncedSize == 0, let db = database, let files = try? db.allTrackedFiles() {
+            syncedSize = files.reduce(0) { $0 + $1.fileSize }
             metricsLock.lock()
-            syncedSize = cachedSyncedSize
-            historySize = cachedHistorySize
+            cachedSyncedSize = syncedSize
             metricsLock.unlock()
-            
-            if syncedSize == 0, let db = database, let files = try? db.allTrackedFiles() {
-                syncedSize = files.reduce(0) { $0 + $1.fileSize }
-                metricsLock.lock()
-                cachedSyncedSize = syncedSize
-                metricsLock.unlock()
-            }
         }
         
         let totalUsed = max(0, totalSpace - freeSpace)

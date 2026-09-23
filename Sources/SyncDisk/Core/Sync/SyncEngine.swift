@@ -121,6 +121,9 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
         
         diskMonitor.destinationURL = config.syncDestination
+        diskMonitor.onPeriodicCheck = { [weak self] in
+            self?.checkDestinationMirrorHealth()
+        }
         
         sleepWakeMonitor.onSleep = { [weak self] in
             guard let self = self else { return }
@@ -721,6 +724,26 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
     
     // MARK: - Reconciliation Scan (Authoritative Source of Truth)
+    
+    /// Periodically checks (every 5s, ~0% CPU) whether the destination mirror folders still exist.
+    /// If the user manually empties the disk, formats it, or deletes a mirror folder in Finder,
+    /// this automatically triggers recovery reconciliation to re-mirror all missing files.
+    public func checkDestinationMirrorHealth() {
+        guard isEngineActive, !isQueuePaused, !isReconciling else { return }
+        guard let destBase = config.syncDestination, diskMonitor.isConnected else { return }
+        let activeSources = config.sources.filter { $0.isEnabled }
+        guard !activeSources.isEmpty else { return }
+        
+        let missingSources = activeSources.filter { source in
+            !fileManager.fileExists(atPath: destBase.appendingPathComponent(source.name).path)
+        }
+        
+        if !missingSources.isEmpty {
+            print("SyncEngine: Detected missing destination folders \(missingSources.map { $0.name }). Recovering mirror...")
+            self.database.reloadFromStorage()
+            self.triggerReconcile()
+        }
+    }
     
     public func triggerReconcile() {
         diskMonitor.checkStatus(forceNotify: false)

@@ -17,6 +17,7 @@ public final class DiskMonitor: @unchecked Sendable {
     
     public private(set) var isConnected: Bool = false
     public var onStatusChange: StatusChangeHandler?
+    public var onPeriodicCheck: (() -> Void)?
     
     public init(destinationURL: URL? = nil, autoStart: Bool = true) {
         self.destinationURL = destinationURL
@@ -77,6 +78,7 @@ public final class DiskMonitor: @unchecked Sendable {
         t.schedule(deadline: .now() + 5.0, repeating: 5.0)
         t.setEventHandler { [weak self] in
             self?.checkStatus(forceNotify: false)
+            self?.onPeriodicCheck?()
         }
         self.timer = t
         t.resume()
