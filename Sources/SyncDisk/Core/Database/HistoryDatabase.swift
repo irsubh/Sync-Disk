@@ -245,8 +245,11 @@ public final class HistoryDatabase: @unchecked Sendable {
             return
         }
         
-        // 1. First check if persistent history_index.json already exists on storageBaseURL
-        if let data = try? Data(contentsOf: indexFileURL),
+        // 1. First check if persistent history_index.json already exists on storageBaseURL,
+        // but ONLY if the snapshots directory actually exists physically on disk.
+        let snapshotsDir = storageBaseURL.appendingPathComponent("snapshots", isDirectory: true)
+        if fileManager.fileExists(atPath: snapshotsDir.path),
+           let data = try? Data(contentsOf: indexFileURL),
            let decoded = try? JSONDecoder().decode([String: [FileHistoryEntry]].self, from: data),
            !decoded.isEmpty {
             self.versionsByPath = decoded
@@ -254,8 +257,8 @@ public final class HistoryDatabase: @unchecked Sendable {
             return
         }
         
-        let snapshotsDir = storageBaseURL.appendingPathComponent("snapshots", isDirectory: true)
-        guard let folderNames = try? fileManager.contentsOfDirectory(atPath: snapshotsDir.path), !folderNames.isEmpty else {
+        guard fileManager.fileExists(atPath: snapshotsDir.path),
+              let folderNames = try? fileManager.contentsOfDirectory(atPath: snapshotsDir.path), !folderNames.isEmpty else {
             self.versionsByPath = [:]
             self.snapshotsByDate = [:]
             self.isIndexLoaded = true
@@ -483,7 +486,7 @@ public final class HistoryDatabase: @unchecked Sendable {
     }
     
     /// Count of unique logical paths that have at least one physically archived copy in .backup
-    /// (i.e. at least one version with a non-empty historyRelativePath starting with "snapshots/").
+    /// that actually exists on disk.
     /// This is the correct value for the "History" sidebar count.
     public func countPathsWithArchivedHistory() -> Int {
         return queue.sync {
@@ -491,7 +494,14 @@ public final class HistoryDatabase: @unchecked Sendable {
                 scanSnapshotsFromStorageLocked()
             }
             return versionsByPath.values.filter { versions in
-                versions.contains(where: { !$0.historyRelativePath.isEmpty })
+                versions.contains(where: { v in
+                    guard !v.historyRelativePath.isEmpty else { return false }
+                    if v.historyRelativePath.hasPrefix("snapshots/") {
+                        let archiveURL = storageBaseURL.appendingPathComponent(v.historyRelativePath)
+                        return fileManager.fileExists(atPath: archiveURL.path)
+                    }
+                    return true
+                })
             }.count
         }
     }
@@ -515,6 +525,16 @@ public final class HistoryDatabase: @unchecked Sendable {
                 
                 let isDeleted = (latest.changeType == .deleted)
                 
+                // Physical archive verification: does an archive file actually exist on disk in .backup?
+                let hasArchived = versions.contains(where: { v in
+                    guard !v.historyRelativePath.isEmpty else { return false }
+                    if v.historyRelativePath.hasPrefix("snapshots/") {
+                        let archiveURL = storageBaseURL.appendingPathComponent(v.historyRelativePath)
+                        return fileManager.fileExists(atPath: archiveURL.path)
+                    }
+                    return true
+                })
+                
                 // Apply filter
                 switch filter {
                 case .all:
@@ -533,8 +553,6 @@ public final class HistoryDatabase: @unchecked Sendable {
                         continue
                     }
                 }
-                
-                let hasArchived = versions.contains(where: { !$0.historyRelativePath.isEmpty })
                 
                 let info = TrackedFileInfo(
                     logicalPath: logicalPath,

@@ -944,6 +944,66 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
     }
     
+    /// Restores a folder to its exact state at a specific snapshot date.
+    /// Safely restores each file at that point in time back to the live Mac source AND external mirror,
+    /// while archiving any current live file state into history so nothing is ever lost.
+    public func restoreFolderToVersion(path: String, at snapshotDate: Date) async throws {
+        let cleanPrefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
+        
+        let snapshot = try database.folderSnapshot(path: cleanPrefix, at: snapshotDate)
+        
+        func extractEntries(from items: [FolderSnapshotItem]) -> [FileHistoryEntry] {
+            var list: [FileHistoryEntry] = []
+            for item in items {
+                if item.isDirectory {
+                    list.append(contentsOf: extractEntries(from: item.children))
+                } else if let entry = item.fileEntry {
+                    list.append(entry)
+                }
+            }
+            return list
+        }
+        
+        let entries = extractEntries(from: snapshot.items)
+        let total = entries.count
+        guard total > 0 else {
+            await MainActor.run {
+                self.syncProgress.statusDescription = "No files found to restore in '\(folderName)' at this version"
+            }
+            return
+        }
+        
+        await MainActor.run {
+            self.syncProgress.statusDescription = "Restoring '\(folderName)'... (0/\(total))"
+        }
+        
+        var restoredCount = 0
+        for entry in entries {
+            do {
+                try await restoreVersion(entry: entry)
+                restoredCount += 1
+                let current = restoredCount
+                await MainActor.run {
+                    self.syncProgress.statusDescription = "Restoring '\(folderName)'... (\(current)/\(total))"
+                }
+            } catch {
+                print("[SyncEngine] Failed to restore file '\(entry.logicalPath)' during folder restore: \(error)")
+            }
+        }
+        
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        let dateStr = df.string(from: snapshotDate)
+        let finalCount = restoredCount
+        
+        await MainActor.run {
+            self.syncProgress.statusDescription = "✓ Restored '\(folderName)' to \(dateStr) (\(finalCount)/\(total) files)"
+            self.refreshDiskStatus()
+        }
+    }
+    
     // MARK: - Reconciliation Scan (Authoritative Source of Truth)
     
     /// Periodically checks (every 5s, ~0% CPU) whether the destination mirror folders still exist.

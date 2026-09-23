@@ -8,6 +8,9 @@ public final class HistoricalInspectorViewModel: ObservableObject {
     @Published public var isExtracting: Bool = false
     @Published public var isMediaPlaying: Bool = false
     @Published public var showRestoreConfirmation: Bool = false
+    @Published public var selectedFileVersionToRestore: FileHistoryEntry?
+    @Published public var selectedFolderVersionToRestore: FolderHistoryVersion?
+    @Published public var isRestoringFolderVersion: Bool = false
     @Published public var showDetailsDisclosure: Bool = false
     @Published public var restoreSuccessMessage: String?
     @Published public var restoreErrorMessage: String?
@@ -93,8 +96,13 @@ public struct HistoricalInspectorView: View {
             loadPreview()
         }
         .sheet(isPresented: $vm.showRestoreConfirmation) {
-            if let ver = entry {
+            if let ver = vm.selectedFileVersionToRestore ?? entry {
                 restoreConfirmationSheet(ver)
+            }
+        }
+        .sheet(item: $vm.selectedFolderVersionToRestore) { ver in
+            if let f = folder {
+                folderRestoreConfirmationSheet(ver, folder: f)
             }
         }
     }
@@ -218,6 +226,22 @@ public struct HistoricalInspectorView: View {
                 if !isRootView {
                     folderTimelineSection(folder: folder)
                 }
+                
+                if let success = vm.restoreSuccessMessage {
+                    Text(success)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.green)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.horizontal, 16)
+                }
+                
+                if let err = vm.restoreErrorMessage {
+                    Text(err)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.red)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.horizontal, 16)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
@@ -316,76 +340,123 @@ public struct HistoricalInspectorView: View {
                             VStack(spacing: 0) {
                                 ForEach(Array(group.entries.enumerated()), id: \.element.id) { index, ver in
                                     let isLast = index == group.entries.count - 1
-                                    
-                                    HStack(alignment: .top, spacing: 10) {
-                                        // Dot & vertical line
-                                        VStack(spacing: 0) {
-                                            if ver.isCurrentVersion {
-                                                Circle()
-                                                    .fill(ver.changeType == .deleted ? Color.red : Color.green)
-                                                    .frame(width: 7, height: 7)
-                                                    .padding(.top, 4)
-                                            } else if ver.changeType == .deleted {
-                                                Circle()
-                                                    .fill(Color.red)
-                                                    .frame(width: 7, height: 7)
-                                                    .padding(.top, 4)
-                                            } else {
-                                                Circle()
-                                                    .strokeBorder(Color.secondary.opacity(0.65), lineWidth: 1.5)
-                                                    .frame(width: 7, height: 7)
-                                                    .padding(.top, 4)
-                                            }
-                                            
-                                            if !isLast {
-                                                Rectangle()
-                                                    .fill(Color(nsColor: .separatorColor).opacity(0.4))
-                                                    .frame(width: 1)
-                                                    .frame(minHeight: 28)
-                                            }
-                                        }
-                                        .frame(width: 12)
-                                        
-                                        // Content
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            HStack {
-                                                Text(timeString(ver.timestamp))
-                                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                                    .foregroundColor(.primary)
-                                                
-                                                Spacer()
-                                                
-                                                Text("v\(ver.versionNumber)")
-                                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                                    .foregroundColor(.secondary)
-                                                    .padding(.horizontal, 5)
-                                                    .padding(.vertical, 1.5)
-                                                    .background(
-                                                        Capsule()
-                                                            .fill(Color(nsColor: .separatorColor).opacity(0.2))
-                                                    )
-                                            }
-                                            
-                                            HStack(spacing: 6) {
-                                                Text(ver.changeType.rawValue.capitalized)
-                                                    .font(.system(size: 11, weight: .medium))
-                                                    .foregroundColor(ver.changeType == .deleted ? .red : (ver.isCurrentVersion ? .green : .secondary))
-                                                
-                                                Text("·")
-                                                    .foregroundColor(.secondary.opacity(0.4))
-                                                
-                                                Text("\(ver.itemCount) item\(ver.itemCount == 1 ? "" : "s")")
-                                                    .font(.system(size: 11))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .padding(.vertical, 4)
+                                    folderTimelineRow(folder: folder, ver: ver, isLast: isLast)
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+    
+    private func folderTimelineRow(
+        folder: FolderDisplayItem,
+        ver: FolderHistoryVersion,
+        isLast: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            // Dot & vertical line
+            VStack(spacing: 0) {
+                if ver.isCurrentVersion {
+                    Circle()
+                        .fill(ver.changeType == .deleted ? Color.red : Color.green)
+                        .frame(width: 7, height: 7)
+                        .padding(.top, 4)
+                } else if ver.changeType == .deleted {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 7, height: 7)
+                        .padding(.top, 4)
+                } else {
+                    Circle()
+                        .strokeBorder(Color.secondary.opacity(0.65), lineWidth: 1.5)
+                        .frame(width: 7, height: 7)
+                        .padding(.top, 4)
+                }
+                
+                if !isLast {
+                    Rectangle()
+                        .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                        .frame(width: 1)
+                        .frame(minHeight: 28)
+                }
+            }
+            .frame(width: 12)
+            
+            // Content
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .center) {
+                    Text(timeString(ver.timestamp))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    Text("v\(ver.versionNumber)")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            Capsule()
+                                .fill(Color(nsColor: .separatorColor).opacity(0.2))
+                        )
+                    
+                    if ver.isCurrentVersion {
+                        Text("Current")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.green)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(
+                                Capsule()
+                                    .fill(Color.green.opacity(0.12))
+                            )
+                    } else {
+                        Button(action: {
+                            vm.selectedFolderVersionToRestore = ver
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 8.5, weight: .bold))
+                                Text("Restore")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            }
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Color.accentColor.opacity(0.12))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help("Restore folder to v\(ver.versionNumber)")
+                    }
+                }
+                
+                HStack(spacing: 6) {
+                    Text(ver.changeType.rawValue.capitalized)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(ver.changeType == .deleted ? .red : (ver.isCurrentVersion ? .green : .secondary))
+                    
+                    Text("·")
+                        .foregroundColor(.secondary.opacity(0.4))
+                    
+                    Text("\(ver.itemCount) item\(ver.itemCount == 1 ? "" : "s")")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                vm.selectedFolderVersionToRestore = ver
+            } label: {
+                Label("Restore folder to v\(ver.versionNumber) (\(fullDateTimeString(ver.timestamp)))", systemImage: "arrow.uturn.backward")
             }
         }
     }
@@ -671,6 +742,39 @@ public struct HistoricalInspectorView: View {
                                     .fill(Color(nsColor: .separatorColor).opacity(0.2))
                             )
                             .layoutPriority(10)
+                        
+                        if entry.isCurrentVersion {
+                            Text("Current")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.green.opacity(0.12))
+                                )
+                        } else {
+                            Button(action: {
+                                vm.selectedFileVersionToRestore = entry
+                                vm.showRestoreConfirmation = true
+                            }) {
+                                HStack(spacing: 2.5) {
+                                    Image(systemName: "arrow.uturn.backward")
+                                        .font(.system(size: 8, weight: .bold))
+                                    Text("Restore")
+                                        .font(.system(size: 9, weight: .semibold))
+                                }
+                                .foregroundColor(.accentColor)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(Color.accentColor.opacity(0.12))
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Restore to v\(entry.versionNumber)")
+                        }
                     }
                     
                     Text(ByteCountFormatter.string(fromByteCount: effectiveFileSize(for: entry), countStyle: .file))
@@ -688,6 +792,19 @@ public struct HistoricalInspectorView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                vm.selectedFileVersionToRestore = entry
+                vm.showRestoreConfirmation = true
+            } label: {
+                Label("Restore to v\(entry.versionNumber)", systemImage: "arrow.uturn.backward")
+            }
+            Button {
+                onSelectVersion(entry)
+            } label: {
+                Label("Inspect version v\(entry.versionNumber)", systemImage: "eye")
+            }
+        }
     }
     
     // MARK: - Details Disclosure
@@ -772,6 +889,15 @@ public struct HistoricalInspectorView: View {
             
             Spacer()
             
+            let isArchiveAvailable: Bool = {
+                if version.historyRelativePath.isEmpty {
+                    return syncEngine.resolveURL(for: version.logicalPath) != nil
+                }
+                let backupBase = syncEngine.config.effectiveHistoryURL ?? syncEngine.storageManager.historyBaseURL
+                let path = backupBase.appendingPathComponent(version.historyRelativePath).path
+                return FileManager.default.fileExists(atPath: path)
+            }()
+            
             Button(action: { vm.showRestoreConfirmation = true }) {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.uturn.backward")
@@ -782,6 +908,7 @@ public struct HistoricalInspectorView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .disabled(!isArchiveAvailable)
         }
     }
     
@@ -812,12 +939,15 @@ public struct HistoricalInspectorView: View {
             HStack(spacing: 12) {
                 Button("Cancel") {
                     vm.showRestoreConfirmation = false
+                    vm.selectedFileVersionToRestore = nil
                 }
                 .keyboardShortcut(.cancelAction)
                 
                 Button("Restore") {
                     vm.showRestoreConfirmation = false
-                    performRestore(ver)
+                    let target = vm.selectedFileVersionToRestore ?? ver
+                    vm.selectedFileVersionToRestore = nil
+                    performRestore(target)
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
@@ -826,6 +956,60 @@ public struct HistoricalInspectorView: View {
         }
         .padding(24)
         .frame(width: 360)
+    }
+    
+    // MARK: - Folder Restore Confirmation Sheet
+    
+    private func folderRestoreConfirmationSheet(_ ver: FolderHistoryVersion, folder: FolderDisplayItem) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "arrow.uturn.backward.circle.fill")
+                .font(.system(size: 38))
+                .foregroundColor(.accentColor)
+            
+            Text("Restore '\(folder.name)'?")
+                .font(.system(size: 15, weight: .bold))
+            
+            VStack(spacing: 4) {
+                Text("Version \(ver.versionNumber) · \(ver.itemCount) item\(ver.itemCount == 1 ? "" : "s")")
+                    .font(.system(size: 13, weight: .medium))
+                Text(fullDateTimeString(ver.timestamp))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            
+            Text("This will restore all files in '\(folder.name)' to their exact state at this version back to your Mac source and backup mirror. Existing live files will be safely preserved in History.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 4)
+            
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    vm.selectedFolderVersionToRestore = nil
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Button(action: {
+                    let versionToRestore = ver
+                    vm.selectedFolderVersionToRestore = nil
+                    performFolderRestore(folder: folder, version: versionToRestore)
+                }) {
+                    if vm.isRestoringFolderVersion {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.horizontal, 8)
+                    } else {
+                        Text("Restore Folder")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(vm.isRestoringFolderVersion)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 4)
+        }
+        .padding(24)
+        .frame(width: 380)
     }
     
     // MARK: - Helpers & Actions
@@ -1026,6 +1210,26 @@ public struct HistoricalInspectorView: View {
             } catch {
                 await MainActor.run {
                     self.vm.restoreErrorMessage = "Restore failed: \(error.localizedDescription)"
+                    self.vm.restoreSuccessMessage = nil
+                }
+            }
+        }
+    }
+    
+    private func performFolderRestore(folder: FolderDisplayItem, version: FolderHistoryVersion) {
+        vm.isRestoringFolderVersion = true
+        Task {
+            do {
+                try await syncEngine.restoreFolderToVersion(path: folder.path, at: version.timestamp)
+                await MainActor.run {
+                    self.vm.isRestoringFolderVersion = false
+                    self.vm.restoreSuccessMessage = "Restored '\(folder.name)' to v\(version.versionNumber)"
+                    self.vm.restoreErrorMessage = nil
+                }
+            } catch {
+                await MainActor.run {
+                    self.vm.isRestoringFolderVersion = false
+                    self.vm.restoreErrorMessage = "Folder restore failed: \(error.localizedDescription)"
                     self.vm.restoreSuccessMessage = nil
                 }
             }

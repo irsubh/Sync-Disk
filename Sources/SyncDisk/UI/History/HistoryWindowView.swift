@@ -151,24 +151,22 @@ public final class HistoryWindowViewModel: ObservableObject {
         // Also count files recorded in history (to catch deleted ones)
         do {
             let historyFiles = try database.allTrackedFiles(query: nil, filter: .all)
-            let historyPaths = Set(historyFiles.map { $0.logicalPath })
             
             // Active = on destination disk
             let active = liveFilePaths.count
             
-            // History = files with archived old versions (deleted OR modified with old copies in .backup)
-            // versionCount > 1 means this file has at least one old archived copy in .backup
-            // isDeleted means it was removed from disk but archived
+            // History = files with physical archived copies in .backup
             let historyFileSet = historyFiles.filter { file in
-                let isDeletedFromDisk = !liveFilePaths.contains(file.logicalPath)
-                let hasArchivedVersions = file.versionCount > 1
-                return isDeletedFromDisk || hasArchivedVersions
+                file.hasArchivedVersion
             }
             
-            // Total = all unique file paths across both live destination + history
-            let allPaths = liveFilePaths.union(historyPaths)
+            // Total = live files + deleted files that have an archived copy in .backup
+            let deletedWithArchive = historyFiles.filter { file in
+                !liveFilePaths.contains(file.logicalPath) && file.hasArchivedVersion
+            }
+            let total = liveFilePaths.count + deletedWithArchive.count
             
-            self.totalCount = allPaths.count
+            self.totalCount = total
             self.activeCount = active
             self.deletedCount = historyFileSet.count
         } catch {
@@ -370,21 +368,28 @@ public final class HistoryWindowViewModel: ObservableObject {
             }
 
             // 3. For History or All files view: show files with archived history
-            // This includes:
-            //   a) Files deleted from disk (classic deleted history)
-            //   b) Files that are STILL live but have old archived versions in .backup (versionCount > 1)
+            // User requirements:
+            // - Active is Real Live
+            // - Backup is archived
+            // - If completely missing (neither live nor archived on disk): NEVER show ghost cache!
             if currentFilter == .history || currentFilter == .all {
                 for hist in historyFiles {
                     let isDeletedFromDisk = hist.isDeleted || !allLivePathsSet.contains(hist.logicalPath)
                     let hasArchivedVersions = hist.hasArchivedVersion
                     
-                    // Show in History if: deleted from disk OR has physical archived copy in .backup
-                    guard isDeletedFromDisk || hasArchivedVersions else { continue }
+                    // Rule 1: If deleted from disk, ONLY show if an archive physically exists on disk.
+                    // If neither live nor archived, it is completely missing: skip ghost cache completely!
+                    if isDeletedFromDisk && !hasArchivedVersions {
+                        continue
+                    }
                     
-                    // For .all filter: skip files already added in the live enumeration pass (non-deleted active files)
-                    // For .history filter: we want ONLY the historical view, so include all qualifying files
+                    // Rule 2: In History view (.history): ONLY show files with verified archived copies available.
+                    if currentFilter == .history && !hasArchivedVersions {
+                        continue
+                    }
+                    
+                    // Rule 3: For .all filter: skip live files here because they were already added in the live pass above
                     if currentFilter == .all && !isDeletedFromDisk {
-                        // Already in liveFilesForView from the enumeration above — skip duplicate
                         continue
                     }
                     
@@ -418,7 +423,8 @@ public final class HistoryWindowViewModel: ObservableObject {
                             lastTimestamp: hist.lastTimestamp,
                             fileSize: hist.fileSize,
                             versionCount: hist.versionCount,
-                            isDeleted: true
+                            isDeleted: true,
+                            hasArchivedVersion: true
                         ))
                     } else {
                         liveFilesForView.append(hist)
@@ -431,7 +437,8 @@ public final class HistoryWindowViewModel: ObservableObject {
             // History count = unique paths with at least one physical archived copy in .backup/snapshots/
             // Using the DB's direct scan of the snapshots directory — most reliable source of truth
             let globalDeletedCount = db.countPathsWithArchivedHistory()
-            let globalTotalCount = allLivePathsSet.union(Set(historyFiles.map { $0.logicalPath })).count
+            let deletedWithArchive = historyFiles.filter { !allLivePathsSet.contains($0.logicalPath) && $0.hasArchivedVersion }
+            let globalTotalCount = globalActiveCount + deletedWithArchive.count
 
             let finalFiles = liveFilesForView
             let finalDirectories = allDirectoriesSet

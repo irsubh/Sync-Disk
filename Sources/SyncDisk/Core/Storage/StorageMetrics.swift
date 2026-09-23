@@ -16,6 +16,14 @@ public final class StorageMetrics: @unchecked Sendable {
         metricsLock.unlock()
     }
     
+    public func resetCachedSizes() {
+        metricsLock.lock()
+        cachedSyncedSize = 0
+        cachedHistorySize = 0
+        lastFullScanDate = Date.distantPast
+        metricsLock.unlock()
+    }
+    
     /// Computes full disk status including external volume space, folder sizes, and history growth metrics.
     public func calculateStatus(
         syncDestination: URL?,
@@ -70,15 +78,17 @@ public final class StorageMetrics: @unchecked Sendable {
         
         let historyURL = historyDestination ?? dest.appendingPathComponent(".backup", isDirectory: true)
         
-        var syncedSize: Int64 = 0
-        var historySize: Int64 = 0
         let now = Date()
+        let totalUsed = max(0, totalSpace - freeSpace)
         
         // Fast live check: Check if destination actually contains any of the configured mirror folders
         let hasAnyMirrorFolder = sources.contains { source in
             fileManager.fileExists(atPath: dest.appendingPathComponent(source.name, isDirectory: true).path)
         }
         let hasHistoryFolder = fileManager.fileExists(atPath: historyURL.appendingPathComponent("snapshots", isDirectory: true).path)
+        
+        var syncedSize: Int64 = 0
+        var historySize: Int64 = 0
         
         metricsLock.lock()
         if !hasAnyMirrorFolder {
@@ -87,29 +97,32 @@ public final class StorageMetrics: @unchecked Sendable {
         if !hasHistoryFolder {
             cachedHistorySize = 0
         }
-        syncedSize = cachedSyncedSize
-        historySize = cachedHistorySize
+        syncedSize = min(cachedSyncedSize, totalUsed)
+        historySize = min(cachedHistorySize, max(0, totalUsed - syncedSize))
         metricsLock.unlock()
         
         let shouldDeepScan = forceDeepScan || (hasAnyMirrorFolder && syncedSize == 0) || (hasHistoryFolder && historySize == 0) || (now.timeIntervalSince(lastFullScanDate) > 60)
         
         if shouldDeepScan {
+            var calculatedSyncedSize: Int64 = 0
             if !sources.isEmpty {
                 for source in sources where source.isEnabled {
                     let sourceDest = dest.appendingPathComponent(source.name, isDirectory: true)
                     if fileManager.fileExists(atPath: sourceDest.path) {
-                        syncedSize += await calculateDirectorySize(at: sourceDest, excludingSubdirectory: nil)
+                        calculatedSyncedSize += await calculateDirectorySize(at: sourceDest, excludingSubdirectory: nil)
                     }
                 }
-            } else {
-                syncedSize = await calculateDirectorySize(at: dest, excludingSubdirectory: historyURL)
             }
             
+            var calculatedHistorySize: Int64 = 0
             if hasHistoryFolder {
-                historySize = await calculateDirectorySize(at: historyURL, excludingSubdirectory: nil)
-            } else {
-                historySize = 0
+                calculatedHistorySize = await calculateDirectorySize(at: historyURL, excludingSubdirectory: nil)
             }
+            
+            // Strictly clamp against physical drive usage:
+            // Sync Disk data can NEVER exceed totalUsed on the external volume.
+            syncedSize = min(calculatedSyncedSize, totalUsed)
+            historySize = min(calculatedHistorySize, max(0, totalUsed - syncedSize))
             
             metricsLock.lock()
             cachedSyncedSize = syncedSize
@@ -117,14 +130,14 @@ public final class StorageMetrics: @unchecked Sendable {
             lastFullScanDate = now
             metricsLock.unlock()
         } else if hasAnyMirrorFolder && syncedSize == 0, let db = database, let files = try? db.allTrackedFiles() {
-            syncedSize = files.reduce(0) { $0 + $1.fileSize }
+            let dbSize = files.reduce(0) { $0 + $1.fileSize }
+            syncedSize = min(dbSize, totalUsed)
             metricsLock.lock()
             cachedSyncedSize = syncedSize
             metricsLock.unlock()
         }
         
-        let totalUsed = max(0, totalSpace - freeSpace)
-        let syncDiskTotal = syncedSize + historySize
+        let syncDiskTotal = min(syncedSize + historySize, totalUsed)
         let otherUsed = max(0, totalUsed - syncDiskTotal)
         
         var totalVersions = 0
