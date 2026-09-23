@@ -9,6 +9,7 @@ public enum SyncEngineState: String, Sendable {
     case copying = "Copying"
     case verifying = "Verifying"
     case committing = "Committing"
+    case restoring = "Restoring"
     case paused = "Paused"
     case error = "Error"
 }
@@ -25,6 +26,35 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     @Published public var lastErrorMessage: String?
     @Published public var activeViewMode: HistoryViewMode = .files
     @Published public var showSettingsSheet: Bool = false
+    
+    @Published public var isRestoring: Bool = false
+    @Published public var restoreTitle: String = ""
+    @Published public var restoreProgress: Double = 0.0
+    @Published public var restoreCurrentFile: Int = 0
+    @Published public var restoreTotalFiles: Int = 0
+    
+    /// User-specific toggle to pause/resume live background syncing
+    @Published public var isLiveSyncPaused: Bool = false
+    
+    @MainActor
+    public func toggleLiveSyncing() {
+        isLiveSyncPaused.toggle()
+        if isLiveSyncPaused {
+            isQueuePaused = true
+            engineState = .paused
+            syncProgress.isSyncing = false
+            syncProgress.statusDescription = "Live Sync Paused"
+        } else {
+            if !isRestoring {
+                isQueuePaused = false
+                engineState = .idle
+                syncProgress.statusDescription = "Live Sync Active"
+                if isEngineActive && diskMonitor.isConnected {
+                    triggerReconcile()
+                }
+            }
+        }
+    }
     
     public private(set) var database: HistoryDatabase
     public private(set) var storageManager: HistoryStorageManager
@@ -183,11 +213,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             Task { @MainActor in
                 self.diskStatus.isConnected = isConnected
                 if isConnected {
-                    self.syncProgress.statusDescription = "Disk Connected — Resuming Sync"
-                    self.isQueuePaused = false
+                    self.isQueuePaused = self.isLiveSyncPaused
                     self.historyRevision += 1
-                    if self.isEngineActive {
-                        self.triggerReconcile()
+                    if self.isLiveSyncPaused {
+                        self.syncProgress.statusDescription = "Disk Connected — Live Sync Paused"
+                    } else {
+                        self.syncProgress.statusDescription = "Disk Connected — Resuming Sync"
+                        if self.isEngineActive {
+                            self.triggerReconcile()
+                        }
                     }
                 } else {
                     self.syncProgress.statusDescription = "Disk Disconnected — Sync Paused"
@@ -212,9 +246,11 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         sleepWakeMonitor.onWake = { [weak self] in
             guard let self = self else { return }
             Task { @MainActor in
-                self.isQueuePaused = false
+                self.isQueuePaused = self.isLiveSyncPaused
                 self.diskMonitor.checkStatus(forceNotify: true)
-                self.triggerReconcile()
+                if !self.isLiveSyncPaused {
+                    self.triggerReconcile()
+                }
             }
         }
     }
@@ -342,12 +378,12 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     // MARK: - File System Events Handling
     
     private func handleFSEvents(_ urls: [URL]) {
-        guard config.isSyncEnabled, diskMonitor.isConnected, !isQueuePaused else {
+        guard config.isSyncEnabled, diskMonitor.isConnected, !isQueuePaused, !isRestoring, !isLiveSyncPaused else {
             return
         }
         
         Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self, !self.isQueuePaused else { return }
+            guard let self = self, !self.isQueuePaused, !self.isRestoring, !self.isLiveSyncPaused else { return }
             guard let destBase = self.config.syncDestination else { return }
             let destPath = destBase.standardizedFileURL.path
             let histPath = self.config.effectiveHistoryURL?.standardizedFileURL.path
@@ -628,41 +664,39 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             // Check if destination was manually edited externally (conflict protection)
             let destSHA = try? storageManager.computeSHA256(for: destinationURL)
             let sourceSHA = try? storageManager.computeSHA256(for: sourceURL)
-            let isExternalDestinationEdit = (latestVersion != nil && destSHA != nil && destSHA != latestVersion?.sha256 && destSHA != sourceSHA)
-            let isUnrecordedDestination = (latestVersion == nil && destSHA != nil && destSHA != sourceSHA)
             
-            // If the destination file was edited externally or has changed:
-            // Move OLD destination data to history (.backup), then active data will replace it
-            if isExternalDestinationEdit || isUnrecordedDestination || (destSHA != nil && destSHA != sourceSHA) {
-                let (relHistPath, histSHA, histSize) = try storageManager.archiveVersion(
-                    sourceFileURL: destinationURL,
-                    logicalPath: logicalPath,
-                    timestamp: destModDate,
-                    database: database
-                )
-                archivedHistorySize = histSize
-                
-                let priorVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
-                try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId, archivePathForLastCurrent: relHistPath)
-                
-                if latestVersion == nil || isExternalDestinationEdit || isUnrecordedDestination {
-                    let histEntry = FileHistoryEntry(
-                        sourceId: sourceId,
+            // Only archive prior version if this file has already been synced before (latestVersion != nil).
+            // During 1st time syncing, do NOT take history or create .backup archives; leave it as live initial version.
+            if let prior = latestVersion, prior.changeType != .deleted {
+                let isExternalDestinationEdit = (destSHA != nil && destSHA != prior.sha256 && destSHA != sourceSHA)
+                if isExternalDestinationEdit || (destSHA != nil && destSHA != sourceSHA) {
+                    let (relHistPath, histSHA, histSize) = try storageManager.archiveVersion(
+                        sourceFileURL: destinationURL,
                         logicalPath: logicalPath,
-                        originalFilename: originalFilename,
                         timestamp: destModDate,
-                        changeType: .modified,
-                        fileSize: histSize,
-                        sha256: histSHA,
-                        historyRelativePath: relHistPath,
-                        isCurrentVersion: false,
-                        versionNumber: priorVerNum
+                        database: database
                     )
-                    try database.insert(version: histEntry)
-                }
-                
-                if isExternalDestinationEdit {
-                    print("SyncEngine: Conflict protected — external destination modification preserved in history.")
+                    archivedHistorySize = histSize
+                    
+                    try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId, archivePathForLastCurrent: relHistPath)
+                    
+                    if isExternalDestinationEdit {
+                        let priorVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
+                        let histEntry = FileHistoryEntry(
+                            sourceId: sourceId,
+                            logicalPath: logicalPath,
+                            originalFilename: originalFilename,
+                            timestamp: destModDate,
+                            changeType: .modified,
+                            fileSize: histSize,
+                            sha256: histSHA,
+                            historyRelativePath: relHistPath,
+                            isCurrentVersion: false,
+                            versionNumber: priorVerNum
+                        )
+                        try database.insert(version: histEntry)
+                        print("SyncEngine: Conflict protected — external destination modification preserved in history.")
+                    }
                 }
             }
         }
@@ -683,14 +717,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         // 5. Record current live version in database (active data is in mirror, not duplicated in .backup)
         try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
-        let currentVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
+        let isInitialSync = (latestVersion == nil || latestVersion?.changeType == .deleted)
+        let currentVerNum = isInitialSync ? 1 : try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
         
         let newEntry = FileHistoryEntry(
             sourceId: sourceId,
             logicalPath: logicalPath,
             originalFilename: originalFilename,
             timestamp: now,
-            changeType: destExists ? .modified : .created,
+            changeType: isInitialSync ? .created : .modified,
             fileSize: mirrorSize,
             sha256: mirrorSHA,
             historyRelativePath: "", // Live active file is at destinationURL, not duplicated in .backup
@@ -856,6 +891,131 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     
     // MARK: - Safe Restore
     
+    /// Instantaneous APFS clonefile when available, falling back to standard copy.
+    private func copyOrClone(from sourceURL: URL, to destURL: URL) throws {
+        let srcStd = sourceURL.standardizedFileURL.path
+        let dstStd = destURL.standardizedFileURL.path
+        if srcStd == dstStd {
+            return
+        }
+        
+        if fileManager.fileExists(atPath: dstStd) {
+            try? fileManager.removeItem(atPath: dstStd)
+        }
+        
+        #if canImport(Darwin)
+        if Darwin.clonefile(srcStd, dstStd, 0) == 0 {
+            return
+        }
+        #endif
+        
+        try fileManager.copyItem(atPath: srcStd, toPath: dstStd)
+    }
+    
+    /// Removes empty subdirectories bottom-up.
+    private func removeEmptySubdirectories(at url: URL) {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) else { return }
+        
+        var subdirs: [URL] = []
+        while let fileURL = enumerator.nextObject() as? URL {
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), isDir.boolValue {
+                subdirs.append(fileURL)
+            }
+        }
+        
+        subdirs.sort(by: { $0.path.count > $1.path.count })
+        for dir in subdirs {
+            if let contents = try? fileManager.contentsOfDirectory(atPath: dir.path), contents.isEmpty {
+                try? fileManager.removeItem(at: dir)
+            }
+        }
+    }
+    
+    /// Robust multi-tier resolver to locate the physical file for any historical entry.
+    public func resolveHistoricalFileURL(for entry: FileHistoryEntry, snapshotDate: Date? = nil) -> URL? {
+        let fm = fileManager
+        let historyBase = config.effectiveHistoryURL ?? storageManager.historyBaseURL
+        
+        // 1. Direct historyRelativePath if non-empty
+        if !entry.historyRelativePath.isEmpty {
+            let u = historyBase.appendingPathComponent(entry.historyRelativePath)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: u.path, isDirectory: &isDir), !isDir.boolValue {
+                return u
+            }
+        }
+        
+        // 2. Specific snapshot folder if snapshotDate provided: snapshots/<yyyy-MM-dd_HH-mm-ss>/<logicalPath>
+        if let sDate = snapshotDate {
+            let folderName = storageManager.snapshotFolderName(for: sDate)
+            let snapPath = "snapshots/\(folderName)/\(entry.logicalPath)"
+            let u = historyBase.appendingPathComponent(snapPath)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: u.path, isDirectory: &isDir), !isDir.boolValue {
+                return u
+            }
+        }
+        
+        // 3. Search database versions for this logicalPath
+        if let allVersions = try? database.history(for: entry.logicalPath) {
+            for v in allVersions where !v.historyRelativePath.isEmpty && v.changeType != .deleted {
+                let u = historyBase.appendingPathComponent(v.historyRelativePath)
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: u.path, isDirectory: &isDir), !isDir.boolValue {
+                    if !entry.sha256.isEmpty && v.sha256 == entry.sha256 {
+                        return u
+                    }
+                }
+            }
+            for v in allVersions where !v.historyRelativePath.isEmpty && v.changeType != .deleted {
+                let u = historyBase.appendingPathComponent(v.historyRelativePath)
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: u.path, isDirectory: &isDir), !isDir.boolValue {
+                    return u
+                }
+            }
+        }
+        
+        // 4. Scan physical snapshot directories on disk
+        let snapshotsDir = historyBase.appendingPathComponent("snapshots", isDirectory: true)
+        if let snapFolders = try? fm.contentsOfDirectory(atPath: snapshotsDir.path) {
+            for folderName in snapFolders.sorted(by: >) {
+                let candidate = snapshotsDir.appendingPathComponent(folderName).appendingPathComponent(entry.logicalPath)
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: candidate.path, isDirectory: &isDir), !isDir.boolValue {
+                    return candidate
+                }
+            }
+        }
+        
+        // 5. Active external mirror destination (e.g. /Volumes/SanDisk/Documents/...)
+        if let dest = config.syncDestination {
+            let mirrorFile = dest.appendingPathComponent(entry.logicalPath)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: mirrorFile.path, isDirectory: &isDir), !isDir.boolValue {
+                return mirrorFile
+            }
+        }
+        
+        // 6. Live Mac source directory
+        if let source = config.sources.first(where: { $0.id == entry.sourceId }) ?? config.sources.first(where: { entry.logicalPath.hasPrefix($0.name + "/") || entry.logicalPath == $0.name }) {
+            let prefix = source.name + "/"
+            let rel = entry.logicalPath.hasPrefix(prefix) ? String(entry.logicalPath.dropFirst(prefix.count)) : entry.logicalPath
+            let srcFile = source.url.appendingPathComponent(rel)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: srcFile.path, isDirectory: &isDir), !isDir.boolValue {
+                return srcFile
+            }
+        }
+        
+        return nil
+    }
+    
     public func restoreVersion(entry: FileHistoryEntry, toTargetURL: URL? = nil) async throws {
         guard let source = config.sources.first(where: { $0.id == entry.sourceId })
             ?? config.sources.first(where: { entry.logicalPath.hasPrefix($0.name + "/") || entry.logicalPath == $0.name }) else {
@@ -868,54 +1028,52 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
         
         let targetURL = toTargetURL ?? source.url.appendingPathComponent(relPath)
+        
+        guard let historyFileURL = resolveHistoricalFileURL(for: entry) else {
+            throw StorageError.fileNotFound(entry.logicalPath)
+        }
+        
+        await MainActor.run {
+            self.isRestoring = true
+            self.isQueuePaused = true
+            self.engineState = .restoring
+            self.restoreTitle = "Restoring \(entry.originalFilename)"
+            self.restoreTotalFiles = 1
+            self.restoreCurrentFile = 0
+            self.restoreProgress = 0.0
+            self.syncProgress.isSyncing = false
+            self.syncProgress.statusDescription = "Restoring \(entry.originalFilename)..."
+        }
+        
+        defer {
+            Task { @MainActor in
+                self.isRestoring = false
+                self.isQueuePaused = self.isLiveSyncPaused
+                self.restoreProgress = 1.0
+                self.restoreCurrentFile = 1
+                self.engineState = self.isLiveSyncPaused ? .paused : .idle
+                self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Live Sync Active"
+                self.historyRevision += 1
+                self.refreshDiskStatus(force: true)
+            }
+        }
+        
         let parentDir = targetURL.deletingLastPathComponent()
         if !fileManager.fileExists(atPath: parentDir.path) {
             try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         }
         
-        // If entry is a deleted version or missing its history path, resolve snapshot from history
-        var fileRelPath = entry.historyRelativePath
-        if fileRelPath.isEmpty || entry.changeType == .deleted {
-            if let nonDel = try? database.history(for: entry.logicalPath).first(where: { $0.changeType != .deleted && !$0.historyRelativePath.isEmpty }) {
-                fileRelPath = nonDel.historyRelativePath
-            }
-        }
+        // Instant APFS clone or fast copy to Mac destination
+        try copyOrClone(from: historyFileURL, to: targetURL)
         
-        let historyFileURL = storageManager.historyBaseURL.appendingPathComponent(fileRelPath)
-        guard fileManager.fileExists(atPath: historyFileURL.path) else {
-            throw StorageError.fileNotFound(historyFileURL.path)
-        }
-        
-        let now = Date()
-        
-        if fileManager.fileExists(atPath: targetURL.path) {
-            let (relHistPath, curSHA, curSize) = try storageManager.archiveVersion(
-                sourceFileURL: targetURL,
-                logicalPath: entry.logicalPath,
-                timestamp: now,
-                database: database
-            )
-            let prevVerNum = try database.nextVersionNumber(for: entry.logicalPath, sourceId: entry.sourceId)
-            let prevEntry = FileHistoryEntry(
-                sourceId: entry.sourceId,
-                logicalPath: entry.logicalPath,
-                originalFilename: entry.originalFilename,
-                timestamp: now,
-                changeType: .modified,
-                fileSize: curSize,
-                sha256: curSHA,
-                historyRelativePath: relHistPath,
-                isCurrentVersion: false,
-                versionNumber: prevVerNum
-            )
-            try database.insert(version: prevEntry)
-        }
-        
-        _ = try storageManager.atomicMirrorCopy(sourceFileURL: historyFileURL, destinationFileURL: targetURL)
-        
+        // Also mirror copy to external destination if configured
         if let destBase = config.syncDestination {
             let destFileURL = destBase.appendingPathComponent(source.name).appendingPathComponent(relPath)
-            _ = try storageManager.atomicMirrorCopy(sourceFileURL: targetURL, destinationFileURL: destFileURL)
+            let destParent = destFileURL.deletingLastPathComponent()
+            if !fileManager.fileExists(atPath: destParent.path) {
+                try fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
+            }
+            try copyOrClone(from: historyFileURL, to: destFileURL)
         }
         
         try database.markPreviousVersionsNotCurrent(logicalPath: entry.logicalPath, sourceId: entry.sourceId)
@@ -934,9 +1092,12 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         )
         try database.insert(version: restoredEntry)
         
+        markPathHandled(logicalPath: entry.logicalPath, size: entry.fileSize, mtime: Date())
+        
         await MainActor.run {
+            self.restoreCurrentFile = 1
+            self.restoreProgress = 1.0
             self.syncProgress.statusDescription = "Restored \(entry.originalFilename)"
-            self.refreshDiskStatus()
         }
     }
     
@@ -958,9 +1119,63 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         let entries = extractEntries(from: snapshot.items)
         guard !entries.isEmpty else { return }
+        let total = entries.count
         
+        await MainActor.run {
+            self.isRestoring = true
+            self.isQueuePaused = true
+            self.engineState = .restoring
+            self.restoreTitle = "Restoring Full Snapshot"
+            self.restoreTotalFiles = total
+            self.restoreCurrentFile = 0
+            self.restoreProgress = 0.0
+            self.syncProgress.isSyncing = false
+        }
+        
+        defer {
+            Task { @MainActor in
+                self.isRestoring = false
+                self.isQueuePaused = self.isLiveSyncPaused
+                self.restoreProgress = 1.0
+                self.restoreCurrentFile = total
+                self.engineState = self.isLiveSyncPaused ? .paused : .idle
+                self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Live Sync Active"
+                self.historyRevision += 1
+                self.refreshDiskStatus(force: true)
+            }
+        }
+        
+        var restoredCount = 0
         for entry in entries {
-            try await restoreVersion(entry: entry)
+            if let backupURL = resolveHistoricalFileURL(for: entry, snapshotDate: date),
+               let source = config.sources.first(where: { $0.id == entry.sourceId }) ?? config.sources.first(where: { entry.logicalPath.hasPrefix($0.name + "/") || entry.logicalPath == $0.name }) {
+                let prefix = source.name + "/"
+                let rel = entry.logicalPath.hasPrefix(prefix) ? String(entry.logicalPath.dropFirst(prefix.count)) : entry.logicalPath
+                let targetURL = source.url.appendingPathComponent(rel)
+                let parent = targetURL.deletingLastPathComponent()
+                if !fileManager.fileExists(atPath: parent.path) {
+                    try? fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+                }
+                try? copyOrClone(from: backupURL, to: targetURL)
+                
+                if let destBase = config.syncDestination {
+                    let destFileURL = destBase.appendingPathComponent(source.name).appendingPathComponent(rel)
+                    let destParent = destFileURL.deletingLastPathComponent()
+                    if !fileManager.fileExists(atPath: destParent.path) {
+                        try? fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
+                    }
+                    try? copyOrClone(from: backupURL, to: destFileURL)
+                }
+                markPathHandled(logicalPath: entry.logicalPath, size: entry.fileSize, mtime: Date())
+            }
+            restoredCount += 1
+            let current = restoredCount
+            let prog = Double(current) / Double(total)
+            await MainActor.run {
+                self.restoreCurrentFile = current
+                self.restoreProgress = prog
+                self.syncProgress.statusDescription = "Restoring snapshot... (\(current)/\(total))"
+            }
         }
         
         let df = DateFormatter()
@@ -969,8 +1184,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         let dateStr = df.string(from: date)
         
         await MainActor.run {
-            self.syncProgress.statusDescription = "Restored snapshot (\(dateStr))"
-            self.refreshDiskStatus()
+            self.syncProgress.statusDescription = "✓ Restored snapshot (\(dateStr))"
         }
     }
     
@@ -979,34 +1193,104 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         let cleanPrefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !cleanPrefix.isEmpty else { return }
         let prefix = cleanPrefix + "/"
+        let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
         
         let allFiles = try database.allTrackedFiles(filter: .all)
         let folderFiles = allFiles.filter { $0.logicalPath.hasPrefix(prefix) }
+        let total = folderFiles.count
+        guard total > 0 else { return }
+        
+        await MainActor.run {
+            self.isRestoring = true
+            self.isQueuePaused = true
+            self.engineState = .restoring
+            self.restoreTitle = "Restoring \(folderName)"
+            self.restoreTotalFiles = total
+            self.restoreCurrentFile = 0
+            self.restoreProgress = 0.0
+            self.syncProgress.isSyncing = false
+            self.syncProgress.statusDescription = "Restoring folder '\(folderName)'... (0/\(total))"
+        }
+        
+        defer {
+            Task { @MainActor in
+                self.isRestoring = false
+                self.isQueuePaused = self.isLiveSyncPaused
+                self.restoreProgress = 1.0
+                self.restoreCurrentFile = total
+                self.engineState = self.isLiveSyncPaused ? .paused : .idle
+                self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Live Sync Active"
+                self.historyRevision += 1
+                self.refreshDiskStatus(force: true)
+            }
+        }
         
         var restoredCount = 0
         for file in folderFiles {
             let vers = try database.history(for: file.logicalPath)
-            if let latestNonDeleted = vers.first(where: { $0.changeType != .deleted && !$0.historyRelativePath.isEmpty }) {
-                try await restoreVersion(entry: latestNonDeleted)
+            if let latestNonDeleted = vers.first(where: { $0.changeType != .deleted && !$0.historyRelativePath.isEmpty }) ?? vers.first(where: { $0.changeType != .deleted }) {
+                if let backupURL = resolveHistoricalFileURL(for: latestNonDeleted),
+                   let source = config.sources.first(where: { $0.id == latestNonDeleted.sourceId }) ?? config.sources.first(where: { latestNonDeleted.logicalPath.hasPrefix($0.name + "/") || latestNonDeleted.logicalPath == $0.name }) {
+                    let p = source.name + "/"
+                    let rel = latestNonDeleted.logicalPath.hasPrefix(p) ? String(latestNonDeleted.logicalPath.dropFirst(p.count)) : latestNonDeleted.logicalPath
+                    let targetURL = source.url.appendingPathComponent(rel)
+                    let parent = targetURL.deletingLastPathComponent()
+                    if !fileManager.fileExists(atPath: parent.path) {
+                        try? fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+                    }
+                    try? copyOrClone(from: backupURL, to: targetURL)
+                    if let destBase = config.syncDestination {
+                        let destFileURL = destBase.appendingPathComponent(source.name).appendingPathComponent(rel)
+                        let destParent = destFileURL.deletingLastPathComponent()
+                        if !fileManager.fileExists(atPath: destParent.path) {
+                            try? fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
+                        }
+                        try? copyOrClone(from: backupURL, to: destFileURL)
+                    }
+                    markPathHandled(logicalPath: latestNonDeleted.logicalPath, size: latestNonDeleted.fileSize, mtime: Date())
+                }
                 restoredCount += 1
+                let current = restoredCount
+                let prog = Double(current) / Double(total)
+                await MainActor.run {
+                    self.restoreCurrentFile = current
+                    self.restoreProgress = prog
+                    self.syncProgress.statusDescription = "Restoring folder '\(folderName)'... (\(current)/\(total))"
+                }
             }
         }
         
-        let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
         let count = restoredCount
         await MainActor.run {
-            self.syncProgress.statusDescription = "Restored folder '\(folderName)' (\(count) files)"
-            self.refreshDiskStatus()
+            self.syncProgress.statusDescription = "✓ Restored folder '\(folderName)' (\(count)/\(total) files)"
         }
     }
     
     /// Restores a folder to its exact state at a specific snapshot date.
-    /// Safely restores each file at that point in time back to the live Mac source AND external mirror,
-    /// while archiving any current live file state into history so nothing is ever lost.
+    /// Completely replaces the current folder with the restored snapshot version:
+    /// 1. Deletes every file currently in the folder that does NOT exist in the snapshot.
+    /// 2. Restores every single file from the backup into both the Mac folder and external mirror.
     public func restoreFolderToVersion(path: String, at snapshotDate: Date) async throws {
         let cleanPrefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
         
+        guard let source = config.sources.first(where: {
+            cleanPrefix == $0.name || cleanPrefix.hasPrefix($0.name + "/")
+        }) else {
+            throw StorageError.restoreFailed("Source directory not found for folder: \(cleanPrefix)")
+        }
+        
+        let relInsideSource: String
+        if cleanPrefix == source.name {
+            relInsideSource = ""
+        } else {
+            relInsideSource = String(cleanPrefix.dropFirst(source.name.count + 1))
+        }
+        
+        let localFolderURL = relInsideSource.isEmpty ? source.url : source.url.appendingPathComponent(relInsideSource)
+        let mirrorFolderURL = config.syncDestination?.appendingPathComponent(cleanPrefix)
+        
+        // 1. Gather all files belonging to this folder at this snapshot date
         let snapshot = try database.folderSnapshot(path: cleanPrefix, at: snapshotDate)
         
         func extractEntries(from items: [FolderSnapshotItem]) -> [FileHistoryEntry] {
@@ -1021,30 +1305,172 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             return list
         }
         
-        let entries = extractEntries(from: snapshot.items)
-        let total = entries.count
-        guard total > 0 else {
-            await MainActor.run {
-                self.syncProgress.statusDescription = "No files found to restore in '\(folderName)' at this version"
+        var entries = extractEntries(from: snapshot.items)
+        if let physicalSnap = try? database.files(forSnapshotAt: snapshotDate) {
+            for se in physicalSnap {
+                if (se.logicalPath == cleanPrefix || se.logicalPath.hasPrefix(cleanPrefix + "/")) {
+                    if !entries.contains(where: { $0.logicalPath == se.logicalPath }) {
+                        entries.append(se)
+                    }
+                }
             }
-            return
         }
         
+        let total = entries.count
+        
         await MainActor.run {
+            self.isRestoring = true
+            self.isQueuePaused = true
+            self.engineState = .restoring
+            self.restoreTitle = "Restoring \(folderName)"
+            self.restoreTotalFiles = total
+            self.restoreCurrentFile = 0
+            self.restoreProgress = 0.0
+            self.syncProgress.isSyncing = false
             self.syncProgress.statusDescription = "Restoring '\(folderName)'... (0/\(total))"
         }
         
+        defer {
+            Task { @MainActor in
+                self.isRestoring = false
+                self.isQueuePaused = self.isLiveSyncPaused
+                self.restoreProgress = 1.0
+                self.restoreCurrentFile = total
+                self.engineState = self.isLiveSyncPaused ? .paused : .idle
+                self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Live Sync Active"
+                self.historyRevision += 1
+                self.refreshDiskStatus(force: true)
+            }
+        }
+        
+        let snapshotLogicalPaths = Set(entries.map { $0.logicalPath })
+        
+        // 2. Folder replacement: Delete any files currently in current folder that do not exist in the restored version
+        let localStd = localFolderURL.standardizedFileURL
+        if fileManager.fileExists(atPath: localStd.path) {
+            let enumerator = fileManager.enumerator(
+                at: localStd,
+                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                options: []
+            )
+            var filesToDelete: [URL] = []
+            while let fileURL = enumerator?.nextObject() as? URL {
+                var isDir: ObjCBool = false
+                let fileStd = fileURL.standardizedFileURL
+                if fileManager.fileExists(atPath: fileStd.path, isDirectory: &isDir), !isDir.boolValue {
+                    let subRel = String(fileStd.path.dropFirst(localStd.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    let itemLogicalPath = cleanPrefix.isEmpty ? subRel : "\(cleanPrefix)/\(subRel)"
+                    if !snapshotLogicalPaths.contains(itemLogicalPath) {
+                        filesToDelete.append(fileStd)
+                    }
+                }
+            }
+            for fileURL in filesToDelete {
+                let subRel = String(fileURL.path.dropFirst(localStd.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let itemLogicalPath = cleanPrefix.isEmpty ? subRel : "\(cleanPrefix)/\(subRel)"
+                try? fileManager.removeItem(at: fileURL)
+                if let mirror = mirrorFolderURL?.standardizedFileURL {
+                    let mirrorFile = mirror.appendingPathComponent(subRel)
+                    try? fileManager.removeItem(at: mirrorFile)
+                }
+                let delVerNum = (try? database.nextVersionNumber(for: itemLogicalPath, sourceId: source.id)) ?? 1
+                let delEntry = FileHistoryEntry(
+                    sourceId: source.id,
+                    logicalPath: itemLogicalPath,
+                    originalFilename: fileURL.lastPathComponent,
+                    timestamp: Date(),
+                    changeType: .deleted,
+                    fileSize: 0,
+                    sha256: "",
+                    historyRelativePath: "",
+                    isCurrentVersion: false,
+                    versionNumber: delVerNum
+                )
+                try? database.insert(version: delEntry)
+            }
+            
+            removeEmptySubdirectories(at: localStd)
+        }
+        
+        // Also ensure mirror destination is clean of any extra files
+        if let mirrorStd = mirrorFolderURL?.standardizedFileURL, fileManager.fileExists(atPath: mirrorStd.path) {
+            let enumerator = fileManager.enumerator(
+                at: mirrorStd,
+                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                options: []
+            )
+            var mirrorFilesToDelete: [URL] = []
+            while let fileURL = enumerator?.nextObject() as? URL {
+                var isDir: ObjCBool = false
+                let fileStd = fileURL.standardizedFileURL
+                if fileManager.fileExists(atPath: fileStd.path, isDirectory: &isDir), !isDir.boolValue {
+                    let subRel = String(fileStd.path.dropFirst(mirrorStd.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    let itemLogicalPath = cleanPrefix.isEmpty ? subRel : "\(cleanPrefix)/\(subRel)"
+                    if !snapshotLogicalPaths.contains(itemLogicalPath) {
+                        mirrorFilesToDelete.append(fileStd)
+                    }
+                }
+            }
+            for fileURL in mirrorFilesToDelete {
+                try? fileManager.removeItem(at: fileURL)
+            }
+            removeEmptySubdirectories(at: mirrorStd)
+        }
+        
+        // 3. Restore every single file from the backup into the local target folder and mirror destination
         var restoredCount = 0
         for entry in entries {
+            guard let backupFileURL = resolveHistoricalFileURL(for: entry, snapshotDate: snapshotDate) else {
+                print("[SyncEngine] Warning: No physical backup file found for '\(entry.logicalPath)'")
+                continue
+            }
+            
+            let relPath = entry.logicalPath.hasPrefix(source.name + "/") ? String(entry.logicalPath.dropFirst(source.name.count + 1)) : entry.logicalPath
+            let targetURL = source.url.appendingPathComponent(relPath)
+            let parentDir = targetURL.deletingLastPathComponent()
+            if !fileManager.fileExists(atPath: parentDir.path) {
+                try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            }
+            
             do {
-                try await restoreVersion(entry: entry)
+                try copyOrClone(from: backupFileURL, to: targetURL)
+                
+                if let destBase = config.syncDestination {
+                    let destFileURL = destBase.appendingPathComponent(source.name).appendingPathComponent(relPath)
+                    let destParent = destFileURL.deletingLastPathComponent()
+                    if !fileManager.fileExists(atPath: destParent.path) {
+                        try fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
+                    }
+                    try copyOrClone(from: backupFileURL, to: destFileURL)
+                }
+                
+                try database.markPreviousVersionsNotCurrent(logicalPath: entry.logicalPath, sourceId: entry.sourceId)
+                let restoredVerNum = try database.nextVersionNumber(for: entry.logicalPath, sourceId: entry.sourceId)
+                let restoredEntry = FileHistoryEntry(
+                    sourceId: entry.sourceId,
+                    logicalPath: entry.logicalPath,
+                    originalFilename: entry.originalFilename,
+                    timestamp: Date(),
+                    changeType: .modified,
+                    fileSize: entry.fileSize,
+                    sha256: entry.sha256,
+                    historyRelativePath: entry.historyRelativePath,
+                    isCurrentVersion: true,
+                    versionNumber: restoredVerNum
+                )
+                try database.insert(version: restoredEntry)
+                markPathHandled(logicalPath: entry.logicalPath, size: entry.fileSize, mtime: Date())
+                
                 restoredCount += 1
                 let current = restoredCount
+                let prog = total > 0 ? Double(current) / Double(total) : 1.0
                 await MainActor.run {
+                    self.restoreCurrentFile = current
+                    self.restoreProgress = prog
                     self.syncProgress.statusDescription = "Restoring '\(folderName)'... (\(current)/\(total))"
                 }
             } catch {
-                print("[SyncEngine] Failed to restore file '\(entry.logicalPath)' during folder restore: \(error)")
+                print("[SyncEngine] Failed to restore file '\(entry.logicalPath)': \(error)")
             }
         }
         
@@ -1056,7 +1482,6 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         await MainActor.run {
             self.syncProgress.statusDescription = "✓ Restored '\(folderName)' to \(dateStr) (\(finalCount)/\(total) files)"
-            self.refreshDiskStatus()
         }
     }
     
@@ -1066,7 +1491,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     /// If the user manually empties the disk, formats it, or deletes a mirror folder in Finder,
     /// this automatically triggers recovery reconciliation to re-mirror all missing files.
     public func checkDestinationMirrorHealth() {
-        guard isEngineActive, !isQueuePaused, !isReconciling else { return }
+        guard isEngineActive, !isQueuePaused, !isReconciling, !isRestoring, !isLiveSyncPaused else { return }
         guard let destBase = config.syncDestination, diskMonitor.isConnected else { return }
         let activeSources = config.sources.filter { $0.isEnabled }
         guard !activeSources.isEmpty else { return }
@@ -1084,11 +1509,11 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     
     public func triggerReconcile() {
         diskMonitor.checkStatus(forceNotify: false)
-        guard config.isSyncEnabled, diskMonitor.isConnected, !isReconciling else { return }
-        self.isQueuePaused = false
+        guard config.isSyncEnabled, diskMonitor.isConnected, !isReconciling, !isRestoring, !isLiveSyncPaused else { return }
+        self.isQueuePaused = self.isLiveSyncPaused
         
         Task.detached(priority: .utility) { [weak self] in
-            guard let self = self, !self.isReconciling else { return }
+            guard let self = self, !self.isReconciling, !self.isRestoring, !self.isLiveSyncPaused else { return }
             self.isReconciling = true
             
             await MainActor.run {
@@ -1101,9 +1526,13 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             await self.reconcileAllSourcesInternal()
             
             await MainActor.run {
-                self.engineState = .idle
+                self.engineState = self.isLiveSyncPaused ? .paused : .idle
                 self.syncProgress.isSyncing = false
-                self.syncProgress.statusDescription = "Idle — Everything up to date"
+                self.syncProgress.filesPending = 0
+                self.syncProgress.filesCompleted = 0
+                self.syncProgress.currentFileName = ""
+                self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Idle — Everything up to date"
+                self.syncProgress.lastSyncDate = Date()
                 self.isReconciling = false
                 self.lastErrorMessage = nil
             }
@@ -1115,7 +1544,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         guard let destBase = config.syncDestination else { return }
         
         for source in config.sources where source.isEnabled {
-            guard !isQueuePaused else { return }
+            guard !isQueuePaused, !isRestoring, !isLiveSyncPaused else { return }
             guard fileManager.fileExists(atPath: source.url.path) else { continue }
             
             var itemsToSync: [PendingSyncItem] = []
@@ -1227,7 +1656,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 let destSrcPath = destSrcFolder.path
                 
                 while let destURL = destEnumerator.nextObject() as? URL {
-                    guard !isQueuePaused else { break }
+                    guard !isQueuePaused, !isLiveSyncPaused else { break }
                     let name = destURL.lastPathComponent
                     if shouldIgnore(filename: name) {
                         var isD: ObjCBool = false
@@ -1280,13 +1709,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             let maxConcurrent = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
             
             await MainActor.run {
+                self.syncProgress.filesPending = totalCount
+                self.syncProgress.filesCompleted = 0
                 self.syncProgress.statusDescription = "Syncing \(source.name) (\(totalCount) files)..."
             }
             
             await withTaskGroup(of: Void.self) { group in
                 var inFlight = 0
                 for item in itemsToSync {
-                    guard !self.isQueuePaused else { break }
+                    guard !self.isQueuePaused, !self.isLiveSyncPaused else { break }
                     if inFlight >= maxConcurrent {
                         await group.next()
                         inFlight -= 1
@@ -1313,7 +1744,11 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     if now.timeIntervalSince(lastReportDate) >= 0.35 || completedCount == totalCount {
                         lastReportDate = now
                         let done = completedCount
+                        let currentName = item.sourceURL.lastPathComponent
                         await MainActor.run {
+                            self.syncProgress.filesCompleted = done
+                            self.syncProgress.filesPending = max(0, totalCount - done)
+                            self.syncProgress.currentFileName = currentName
                             self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalCount))..."
                         }
                     }

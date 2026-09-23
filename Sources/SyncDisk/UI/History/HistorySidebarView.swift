@@ -180,6 +180,9 @@ public struct HistorySidebarView: View {
             
             Spacer()
             
+            // Active Activity Card (shown above storage widget for Restoring, Syncing, or Paused)
+            activityStatusCard
+            
             // Storage Detailed Footer Card
             storageDetailedCard
         }
@@ -240,6 +243,200 @@ public struct HistorySidebarView: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 6)
+    }
+    
+    // MARK: - Activity Status Cards (Restoring, Syncing, or Paused)
+    
+    @ViewBuilder
+    private var activityStatusCard: some View {
+        if syncEngine.isRestoring {
+            restoreProgressCard
+        } else if syncEngine.syncProgress.isSyncing {
+            syncingProgressCard
+        } else if syncEngine.isLiveSyncPaused {
+            pausedStatusCard
+        }
+    }
+
+    @ViewBuilder
+    private var restoreProgressCard: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.65)
+                    .frame(width: 14, height: 14)
+                
+                Text(syncEngine.restoreTitle.isEmpty ? "Restoring" : syncEngine.restoreTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                let pct = Int(round(syncEngine.restoreProgress * 100))
+                Text("\(pct)%")
+                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .foregroundColor(.accentColor)
+            }
+            
+            // Progress Bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                        .frame(height: 5)
+                    
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: max(4, geo.size.width * CGFloat(min(1.0, max(0.0, syncEngine.restoreProgress)))), height: 5)
+                        .animation(.linear(duration: 0.15), value: syncEngine.restoreProgress)
+                }
+            }
+            .frame(height: 5)
+            
+            HStack {
+                Text("Restoring files…")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                Text("\(syncEngine.restoreCurrentFile) / \(syncEngine.restoreTotalFiles)")
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.accentColor.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.accentColor.opacity(0.25), lineWidth: 0.8)
+                )
+        )
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+    
+    @ViewBuilder
+    private var syncingProgressCard: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.65)
+                    .frame(width: 14, height: 14)
+                
+                Text(syncEngine.syncProgress.currentFileName.isEmpty ? "Live Syncing" : syncEngine.syncProgress.currentFileName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                let pct = Int(round(syncEngine.syncProgress.fractionCompleted * 100))
+                if syncEngine.syncProgress.filesTotal > 0 {
+                    Text("\(pct)%")
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .foregroundColor(.accentColor)
+                }
+            }
+            
+            // Progress Bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(nsColor: .separatorColor).opacity(0.3))
+                        .frame(height: 5)
+                    
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(
+                            width: syncEngine.syncProgress.filesTotal > 0
+                                ? max(4, geo.size.width * CGFloat(min(1.0, max(0.0, syncEngine.syncProgress.fractionCompleted))))
+                                : 24,
+                            height: 5
+                        )
+                        .animation(.linear(duration: 0.15), value: syncEngine.syncProgress.fractionCompleted)
+                }
+            }
+            .frame(height: 5)
+            
+            HStack {
+                Text(syncEngine.syncProgress.statusDescription.isEmpty ? "Syncing files…" : syncEngine.syncProgress.statusDescription)
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                if syncEngine.syncProgress.filesTotal > 0 {
+                    Text("\(syncEngine.syncProgress.filesCompleted) / \(syncEngine.syncProgress.filesTotal)")
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.accentColor.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.accentColor.opacity(0.25), lineWidth: 0.8)
+                )
+        )
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+    
+    @ViewBuilder
+    private var pausedStatusCard: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pause.circle.fill")
+                .font(.system(size: 14))
+                .foregroundColor(.orange)
+            
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Live Sync Paused")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("Monitoring suspended")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                syncEngine.toggleLiveSyncing()
+            }) {
+                Text("Resume")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.orange.opacity(0.12))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.orange.opacity(0.25), lineWidth: 0.8)
+                )
+        )
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
     @ViewBuilder

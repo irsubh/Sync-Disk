@@ -146,8 +146,8 @@ public struct MenuBarPopupView: View {
             VStack(spacing: 2) {
                 MenuActionRow(
                     icon: "arrow.triangle.2.circlepath",
-                    title: syncEngine.syncProgress.isSyncing ? "Syncing in background…" : "Sync Now",
-                    isEnabled: disk.isConnected && !syncEngine.syncProgress.isSyncing,
+                    title: syncEngine.isRestoring ? "Restoring in progress…" : (syncEngine.syncProgress.isSyncing ? "Syncing in background…" : "Sync Now"),
+                    isEnabled: disk.isConnected && !syncEngine.syncProgress.isSyncing && !syncEngine.isRestoring,
                     action: {
                         syncEngine.triggerReconcile()
                     }
@@ -196,7 +196,11 @@ public struct MenuBarPopupView: View {
     
     // Status color mapping
     private var statusColor: Color {
-        if !disk.isConnected {
+        if syncEngine.isRestoring {
+            return .accentColor
+        } else if !disk.isConnected {
+            return .orange
+        } else if syncEngine.isLiveSyncPaused {
             return .orange
         } else if syncEngine.syncProgress.isSyncing {
             return .accentColor
@@ -208,8 +212,12 @@ public struct MenuBarPopupView: View {
     }
     
     private var statusBadgeTitle: String {
-        if !disk.isConnected {
+        if syncEngine.isRestoring {
+            return "Restoring"
+        } else if !disk.isConnected {
             return "Offline"
+        } else if syncEngine.isLiveSyncPaused {
+            return "Paused"
         } else if syncEngine.syncProgress.isSyncing {
             return "Syncing"
         } else if syncEngine.lastErrorMessage != nil {
@@ -220,8 +228,14 @@ public struct MenuBarPopupView: View {
     }
     
     private var statusText: String {
-        if !disk.isConnected {
+        if syncEngine.isRestoring {
+            let done = syncEngine.restoreCurrentFile
+            let total = syncEngine.restoreTotalFiles
+            return total > 0 ? "Restoring (\(done)/\(total) files)" : "Restoring files…"
+        } else if !disk.isConnected {
             return "Disk disconnected"
+        } else if syncEngine.isLiveSyncPaused {
+            return "Live syncing paused"
         } else if syncEngine.syncProgress.isSyncing {
             return "Syncing (\(syncEngine.syncProgress.filesPending) files left)"
         } else if let err = syncEngine.lastErrorMessage {

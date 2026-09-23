@@ -393,27 +393,27 @@ public struct HistoricalInspectorView: View {
                     
                     Spacer()
                     
-                    Text("v\(ver.versionNumber)")
-                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(
-                            Capsule()
-                                .fill(Color(nsColor: .separatorColor).opacity(0.2))
-                        )
-                    
                     if ver.isCurrentVersion {
-                        Text("Current")
-                            .font(.system(size: 9, weight: .bold))
+                        Text("Live")
+                            .font(.system(size: 9.5, weight: .bold))
                             .foregroundColor(.green)
-                            .padding(.horizontal, 5)
+                            .padding(.horizontal, 6)
                             .padding(.vertical, 1.5)
                             .background(
                                 Capsule()
                                     .fill(Color.green.opacity(0.12))
                             )
                     } else {
+                        Text("v\(ver.versionNumber)")
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(
+                                Capsule()
+                                    .fill(Color(nsColor: .separatorColor).opacity(0.2))
+                            )
+                        
                         Button(action: {
                             vm.selectedFolderVersionToRestore = ver
                         }) {
@@ -730,30 +730,30 @@ public struct HistoricalInspectorView: View {
                         
                         Spacer()
                         
-                        Text("v\(entry.versionNumber)")
-                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(
-                                Capsule()
-                                    .fill(Color(nsColor: .separatorColor).opacity(0.2))
-                            )
-                            .layoutPriority(10)
-                        
                         if entry.isCurrentVersion {
-                            Text("Current")
+                            Text("Live")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(.green)
-                                .padding(.horizontal, 5)
+                                .padding(.horizontal, 6)
                                 .padding(.vertical, 1.5)
                                 .background(
                                     Capsule()
                                         .fill(Color.green.opacity(0.12))
                                 )
                         } else {
+                            Text("v\(entry.versionNumber)")
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    Capsule()
+                                        .fill(Color(nsColor: .separatorColor).opacity(0.2))
+                                )
+                                .layoutPriority(10)
+                            
                             Button(action: {
                                 vm.selectedFileVersionToRestore = entry
                                 vm.showRestoreConfirmation = true
@@ -818,7 +818,7 @@ public struct HistoricalInspectorView: View {
                     detailRow(label: "Path", value: version.logicalPath)
                     let effSize = effectiveFileSize(for: version)
                     detailRow(label: "Size", value: "\(effSize) bytes")
-                    detailRow(label: "Version", value: "\(version.versionNumber)")
+                    detailRow(label: "Version", value: version.isCurrentVersion ? "Live" : "v\(version.versionNumber)")
                     
                     HStack {
                         Text("SHA-256")
@@ -970,7 +970,7 @@ public struct HistoricalInspectorView: View {
                 .font(.system(size: 15, weight: .bold))
             
             VStack(spacing: 4) {
-                Text("Version \(ver.versionNumber) · \(ver.itemCount) item\(ver.itemCount == 1 ? "" : "s")")
+                Text("\(ver.isCurrentVersion ? "Live" : "Version \(ver.versionNumber)") · \(ver.itemCount) item\(ver.itemCount == 1 ? "" : "s")")
                     .font(.system(size: 13, weight: .medium))
                 Text(fullDateTimeString(ver.timestamp))
                     .font(.system(size: 12, design: .monospaced))

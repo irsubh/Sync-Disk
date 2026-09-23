@@ -1426,6 +1426,17 @@ public struct HistoryWindowView: View {
                     .foregroundColor(.secondary)
             }
             
+            // Icon-only Pause / Resume Live Syncing button (no text)
+            Button(action: {
+                syncEngine.toggleLiveSyncing()
+            }) {
+                Image(systemName: syncEngine.isLiveSyncPaused ? "play.circle.fill" : "pause.circle.fill")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(syncEngine.isLiveSyncPaused ? .orange : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(syncEngine.isLiveSyncPaused ? "Resume Live Syncing" : "Pause Live Syncing")
+            
             Button(action: {
                 syncEngine.showSettingsSheet = true
             }) {
@@ -1441,6 +1452,10 @@ public struct HistoryWindowView: View {
     private var statusColor: Color {
         if !syncEngine.diskStatus.isConnected {
             return .orange
+        } else if syncEngine.isRestoring {
+            return .accentColor
+        } else if syncEngine.isLiveSyncPaused {
+            return .orange
         } else if syncEngine.syncProgress.isSyncing {
             return .accentColor
         } else {
@@ -1451,6 +1466,10 @@ public struct HistoryWindowView: View {
     private var statusText: String {
         if !syncEngine.diskStatus.isConnected {
             return "Disconnected"
+        } else if syncEngine.isRestoring {
+            return "Restoring"
+        } else if syncEngine.isLiveSyncPaused {
+            return "Paused"
         } else if syncEngine.syncProgress.isSyncing {
             return "Syncing"
         } else {

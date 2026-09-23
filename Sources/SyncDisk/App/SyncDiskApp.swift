@@ -27,7 +27,11 @@ public struct SyncDiskApp: App {
         } label: {
             HStack(spacing: 3) {
                 Image(nsImage: MenuBarIconProvider.shared.icon())
-                if syncEngine.syncProgress.isSyncing {
+                if syncEngine.isRestoring {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 4, height: 4)
+                } else if syncEngine.syncProgress.isSyncing {
                     Circle()
                         .fill(Color.accentColor)
                         .frame(width: 4, height: 4)
