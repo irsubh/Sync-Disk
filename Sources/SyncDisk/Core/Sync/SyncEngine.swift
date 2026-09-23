@@ -552,6 +552,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         // 3. Conflict Protection & Prior Version Preservation
         let latestVersion = try database.latestVersion(for: logicalPath, sourceId: sourceId)
+        var archivedHistorySize: Int64 = 0
         
         if destExists {
             let destAttrs = try fileManager.attributesOfItem(atPath: destinationURL.path)
@@ -575,31 +576,35 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             let isExternalDestinationEdit = (latestVersion != nil && destSHA != nil && destSHA != latestVersion?.sha256 && destSHA != sourceSHA)
             let isUnrecordedDestination = (latestVersion == nil && destSHA != nil && destSHA != sourceSHA)
             
-            // If the destination file was edited externally or was never recorded with different content, archive it
-            if isExternalDestinationEdit || isUnrecordedDestination {
+            // If the destination file was edited externally or has changed:
+            // Move OLD destination data to history (.backup), then active data will replace it
+            if isExternalDestinationEdit || isUnrecordedDestination || (destSHA != nil && destSHA != sourceSHA) {
                 let (relHistPath, histSHA, histSize) = try storageManager.archiveVersion(
                     sourceFileURL: destinationURL,
                     logicalPath: logicalPath,
                     timestamp: destModDate,
                     database: database
                 )
+                archivedHistorySize = histSize
                 
                 let priorVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
-                try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
+                try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId, archivePathForLastCurrent: relHistPath)
                 
-                let histEntry = FileHistoryEntry(
-                    sourceId: sourceId,
-                    logicalPath: logicalPath,
-                    originalFilename: originalFilename,
-                    timestamp: destModDate,
-                    changeType: .modified,
-                    fileSize: histSize,
-                    sha256: histSHA,
-                    historyRelativePath: relHistPath,
-                    isCurrentVersion: false,
-                    versionNumber: priorVerNum
-                )
-                try database.insert(version: histEntry)
+                if latestVersion == nil || isExternalDestinationEdit || isUnrecordedDestination {
+                    let histEntry = FileHistoryEntry(
+                        sourceId: sourceId,
+                        logicalPath: logicalPath,
+                        originalFilename: originalFilename,
+                        timestamp: destModDate,
+                        changeType: .modified,
+                        fileSize: histSize,
+                        sha256: histSHA,
+                        historyRelativePath: relHistPath,
+                        isCurrentVersion: false,
+                        versionNumber: priorVerNum
+                    )
+                    try database.insert(version: histEntry)
+                }
                 
                 if isExternalDestinationEdit {
                     print("SyncEngine: Conflict protected — external destination modification preserved in history.")
@@ -607,28 +612,21 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             }
         }
         
-        // 4. Archive the new version into History Storage (capturing initial and all subsequent versions)
-        let (sourceRelHistPath, sourceSHA, sourceSize) = try storageManager.archiveVersion(
-            sourceFileURL: sourceURL,
-            logicalPath: logicalPath,
-            timestamp: now,
-            database: database
-        )
-        
         try database.updateJournalState(id: journalId, state: .verifying)
         
-        // 5. Mirror to external destination
+        // 4. Mirror to external destination: Real/live data sits directly in the destination mirror
         let (mirrorSHA, mirrorSize) = try storageManager.atomicMirrorCopy(
             sourceFileURL: sourceURL,
             destinationFileURL: destinationURL
         )
         
-        guard mirrorSHA == sourceSHA, mirrorSize == sourceSize else {
+        guard let sourceSHA = try? storageManager.computeSHA256(for: sourceURL),
+              mirrorSHA == sourceSHA, mirrorSize == (try? fileManager.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber)?.int64Value ?? mirrorSize else {
             try database.updateJournalState(id: journalId, state: .failed)
             throw StorageError.verificationFailed("Mirror copy verification mismatch")
         }
         
-        // 6. Record current version in database
+        // 5. Record current live version in database (active data is in mirror, not duplicated in .backup)
         try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
         let currentVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
         
@@ -640,19 +638,19 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             changeType: destExists ? .modified : .created,
             fileSize: mirrorSize,
             sha256: mirrorSHA,
-            historyRelativePath: sourceRelHistPath,
+            historyRelativePath: "", // Live active file is at destinationURL, not duplicated in .backup
             isCurrentVersion: true,
             versionNumber: currentVerNum
         )
         try database.insert(version: newEntry)
         
-        // 7. Mark Journal operation as committed
+        // 6. Mark Journal operation as committed
         try database.updateJournalState(id: journalId, state: .committed)
         
         self.markPathHandled(logicalPath: logicalPath, size: mirrorSize, mtime: now)
-        self.storageMetrics.updateCachedSizes(syncedDelta: mirrorSize, historyDelta: sourceSize)
+        self.storageMetrics.updateCachedSizes(syncedDelta: mirrorSize, historyDelta: archivedHistorySize)
         
-        // 8. Safe iCloud Eviction: ONLY after external backup is verified!
+        // 7. Safe iCloud Eviction: ONLY after external backup is verified!
         if config.evictICloudAfterSync && (iCloudState == .downloaded || iCloudManager.isUbiquitousItem(at: sourceURL)) {
             var verificationState: ICloudSyncState = .verified
             self.markPathHandled(logicalPath: logicalPath, size: mirrorSize, mtime: now)

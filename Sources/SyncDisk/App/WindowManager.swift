@@ -18,8 +18,8 @@ public final class WindowManager: NSObject, ObservableObject, NSWindowDelegate {
         syncEngine.activeViewMode = initialMode
         
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-        let targetWidth: CGFloat = min(1680, screen.width * 0.95)
-        let targetHeight: CGFloat = min(888, screen.height * 0.95)
+        let targetWidth: CGFloat = min(1176, screen.width * 0.95)
+        let targetHeight: CGFloat = min(799, screen.height * 0.95)
         
         if let window = historyWindow {
             if window.isMiniaturized {
@@ -33,7 +33,7 @@ public final class WindowManager: NSObject, ObservableObject, NSWindowDelegate {
         }
         
         let contentView = HistoryWindowView(syncEngine: syncEngine)
-            .frame(minWidth: 960, idealWidth: targetWidth, minHeight: 580, idealHeight: targetHeight)
+            .frame(minWidth: 820, idealWidth: targetWidth, minHeight: 500, idealHeight: targetHeight)
         let hostingController = NSHostingController(rootView: contentView)
         hostingController.view.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         
@@ -45,7 +45,7 @@ public final class WindowManager: NSObject, ObservableObject, NSWindowDelegate {
         )
         
         window.title = "Sync Disk"
-        window.minSize = NSSize(width: 960, height: 580)
+        window.minSize = NSSize(width: 820, height: 500)
         window.toolbarStyle = .unifiedCompact
         window.titleVisibility = .hidden
         window.contentViewController = hostingController

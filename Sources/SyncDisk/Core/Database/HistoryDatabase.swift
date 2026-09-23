@@ -361,11 +361,16 @@ public final class HistoryDatabase: @unchecked Sendable {
         }
     }
     
-    public func markPreviousVersionsNotCurrent(logicalPath: String, sourceId: UUID) throws {
+    public func markPreviousVersionsNotCurrent(logicalPath: String, sourceId: UUID, archivePathForLastCurrent: String? = nil) throws {
         queue.sync {
             guard var list = versionsByPath[logicalPath] else { return }
             for i in 0..<list.count {
-                list[i].isCurrentVersion = false
+                if list[i].isCurrentVersion {
+                    list[i].isCurrentVersion = false
+                    if let archivePath = archivePathForLastCurrent, list[i].historyRelativePath.isEmpty {
+                        list[i].historyRelativePath = archivePath
+                    }
+                }
             }
             versionsByPath[logicalPath] = list
             saveIndexToStorageLocked()

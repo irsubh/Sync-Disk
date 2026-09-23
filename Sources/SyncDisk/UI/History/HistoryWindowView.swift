@@ -1238,7 +1238,7 @@ public struct HistoryWindowView: View {
                             )
                         }
                     }
-                    .navigationSplitViewColumnWidth(min: 350, ideal: 1000, max: .infinity)
+                    .navigationSplitViewColumnWidth(min: 350, ideal: 700, max: .infinity)
                     .toolbar {
                         ToolbarItem(placement: .principal) {
                             middleToolbarGroup

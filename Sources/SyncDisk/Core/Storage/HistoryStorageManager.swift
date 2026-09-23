@@ -227,7 +227,18 @@ public final class HistoryStorageManager: @unchecked Sendable {
     /// Extracts a historical version into a clean temporary sandbox location
     /// with its ORIGINAL logical filename (e.g. "AnnualReport.pdf").
     public func extractHistoricalFile(entry: FileHistoryEntry) throws -> URL {
-        let historyFileURL = historyBaseURL.appendingPathComponent(entry.historyRelativePath)
+        let historyFileURL: URL
+        if !entry.historyRelativePath.isEmpty {
+            historyFileURL = historyBaseURL.appendingPathComponent(entry.historyRelativePath)
+        } else {
+            // Live file in mirror destination
+            let mirrorCandidate = historyBaseURL.deletingLastPathComponent().appendingPathComponent(entry.logicalPath)
+            if fileManager.fileExists(atPath: mirrorCandidate.path) {
+                historyFileURL = mirrorCandidate
+            } else {
+                throw StorageError.fileNotFound(entry.logicalPath)
+            }
+        }
         guard fileManager.fileExists(atPath: historyFileURL.path) else {
             throw StorageError.fileNotFound(historyFileURL.path)
         }
