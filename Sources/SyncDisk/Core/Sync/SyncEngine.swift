@@ -140,7 +140,9 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         handledPathsLock.lock()
         defer { handledPathsLock.unlock() }
         guard let entry = recentlyHandledPaths[logicalPath] else { return false }
-        if Date().timeIntervalSince(entry.date) < 15.0 {
+        // Only ignore if the file size and mtime match what was recently handled (echo suppression).
+        // If the file changed (e.g. was dataless/size 0, now has data, or mtime changed), do NOT ignore!
+        if entry.size == currentSize && abs(entry.mtime.timeIntervalSince(currentMtime)) < 1.0 {
             return true
         }
         return false
@@ -354,7 +356,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     
     public func refreshDiskStatus(force: Bool = false) {
         let now = Date()
-        if !force && now.timeIntervalSince(lastDiskStatusCalculation) < 10.0 {
+        if !force && now.timeIntervalSince(lastDiskStatusCalculation) < 3.0 {
             return
         }
         lastDiskStatusCalculation = now
@@ -597,7 +599,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         sourceURL: URL,
         destinationURL: URL,
         logicalPath: String,
-        sourceId: UUID
+        sourceId: UUID,
+        iCloudTimeoutSeconds: TimeInterval = 45.0
     ) async throws {
         guard diskMonitor.isConnected, !isQueuePaused else { return }
         
@@ -630,7 +633,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             await MainActor.run {
                 self.syncProgress.statusDescription = "Downloading \(originalFilename) from iCloud..."
             }
-            iCloudState = await self.iCloudManager.ensureFileDownloaded(at: sourceURL)
+            iCloudState = await self.iCloudManager.ensureFileDownloaded(at: sourceURL, timeoutSeconds: iCloudTimeoutSeconds)
             
             if iCloudState == .failed {
                 try database.updateJournalState(id: journalId, state: .failed)
@@ -709,8 +712,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             destinationFileURL: destinationURL
         )
         
-        guard let sourceSHA = try? storageManager.computeSHA256(for: sourceURL),
-              mirrorSHA == sourceSHA, mirrorSize == (try? fileManager.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber)?.int64Value ?? mirrorSize else {
+        let expectedSourceSize = (try? fileManager.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber)?.int64Value ?? mirrorSize
+        guard mirrorSize == expectedSourceSize else {
             try database.updateJournalState(id: journalId, state: .failed)
             throw StorageError.verificationFailed("Mirror copy verification mismatch")
         }
@@ -1507,6 +1510,9 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
     }
     
+    /// Tracks iCloud files skipped during reconcile so we can auto-retry once they download.
+    private var iCloudSkippedCount: Int = 0
+    
     public func triggerReconcile() {
         diskMonitor.checkStatus(forceNotify: false)
         guard config.isSyncEnabled, diskMonitor.isConnected, !isReconciling, !isRestoring, !isLiveSyncPaused else { return }
@@ -1515,28 +1521,41 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         Task.detached(priority: .utility) { [weak self] in
             guard let self = self, !self.isReconciling, !self.isRestoring, !self.isLiveSyncPaused else { return }
             self.isReconciling = true
+            self.iCloudSkippedCount = 0
             
             await MainActor.run {
                 self.engineState = .scanning
                 self.syncProgress.isSyncing = true
-                self.syncProgress.statusDescription = "Reconciling changes..."
+                self.syncProgress.statusDescription = "Scanning and indexing files..."
                 self.lastErrorMessage = nil
             }
             
             await self.reconcileAllSourcesInternal()
             
+            let skipped = self.iCloudSkippedCount
             await MainActor.run {
-                self.engineState = self.isLiveSyncPaused ? .paused : .idle
-                self.syncProgress.isSyncing = false
-                self.syncProgress.filesPending = 0
-                self.syncProgress.filesCompleted = 0
-                self.syncProgress.currentFileName = ""
-                self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Idle — Everything up to date"
+                self.engineState = self.isLiveSyncPaused ? .paused : (skipped > 0 ? .copying : .idle)
+                self.syncProgress.isSyncing = skipped > 0
+                self.syncProgress.filesPending = skipped
+                if skipped > 0 {
+                    self.syncProgress.statusDescription = "Downloading \(skipped) file\(skipped == 1 ? "" : "s") from iCloud..."
+                } else {
+                    self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Idle — Everything up to date"
+                    self.syncProgress.filesCompleted = 0
+                    self.syncProgress.currentFileName = ""
+                }
                 self.syncProgress.lastSyncDate = Date()
                 self.isReconciling = false
                 self.lastErrorMessage = nil
             }
             self.refreshDiskStatus(force: false)
+            
+            // If iCloud files are still downloading, fast-retry after 5s without dropping out to idle
+            if skipped > 0, !self.isLiveSyncPaused, self.diskMonitor.isConnected {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !self.isReconciling, !self.isLiveSyncPaused, self.diskMonitor.isConnected else { return }
+                await MainActor.run { self.triggerReconcile() }
+            }
         }
     }
     
@@ -1547,7 +1566,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             guard !isQueuePaused, !isRestoring, !isLiveSyncPaused else { return }
             guard fileManager.fileExists(atPath: source.url.path) else { continue }
             
-            var itemsToSync: [PendingSyncItem] = []
+            var readyItems: [PendingSyncItem] = []
+            var iCloudPendingItems: [PendingSyncItem] = []
             
             let enumerator = fileManager.enumerator(
                 at: source.url,
@@ -1587,14 +1607,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 
                 let destExists = fileManager.fileExists(atPath: destFileURL.path)
                 let latestVersion = try? database.latestVersion(for: logicalPath, sourceId: src.id)
+                let isDataless = iCloudManager.isDatalessICloudItem(at: fileURL)
                 
                 if destExists {
                     let destAttrs = try? fileManager.attributesOfItem(atPath: destFileURL.path)
                     let destSize = (destAttrs?[.size] as? NSNumber)?.int64Value ?? 0
                     let destDate = destAttrs?[.modificationDate] as? Date
                     
-                    // Dataless iCloud check: If file is dataless locally in iCloud, and ALREADY backed up to destination:
-                    if iCloudManager.isDatalessICloudItem(at: fileURL) {
+                    // If file is dataless locally in iCloud, and ALREADY backed up to destination:
+                    if isDataless {
                         if latestVersion == nil && destSize > 0 {
                             try? database.recordVersion(
                                 sourceId: src.id,
@@ -1636,12 +1657,20 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     }
                 }
                 
-                itemsToSync.append(PendingSyncItem(
+                let syncItem = PendingSyncItem(
                     sourceURL: fileURL,
                     destinationURL: destFileURL,
                     logicalPath: logicalPath,
                     sourceId: src.id
-                ))
+                )
+                
+                if isDataless {
+                    // Pre-trigger download immediately with macOS!
+                    iCloudManager.triggerDownload(at: fileURL)
+                    iCloudPendingItems.append(syncItem)
+                } else {
+                    readyItems.append(syncItem)
+                }
             }
             
             // Check for locally deleted files and directories on destination mirror
@@ -1701,9 +1730,9 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 }
             }
             
-            guard !itemsToSync.isEmpty else { continue }
+            let totalCount = readyItems.count + iCloudPendingItems.count
+            guard totalCount > 0 else { continue }
             
-            let totalCount = itemsToSync.count
             var completedCount = 0
             var lastReportDate = Date.distantPast
             let maxConcurrent = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
@@ -1714,49 +1743,139 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 self.syncProgress.statusDescription = "Syncing \(source.name) (\(totalCount) files)..."
             }
             
-            await withTaskGroup(of: Void.self) { group in
-                var inFlight = 0
-                for item in itemsToSync {
-                    guard !self.isQueuePaused, !self.isLiveSyncPaused else { break }
-                    if inFlight >= maxConcurrent {
-                        await group.next()
-                        inFlight -= 1
-                    }
-                    inFlight += 1
-                    group.addTask {
-                        do {
-                            try await self.syncFileToDestination(
-                                sourceURL: item.sourceURL,
-                                destinationURL: item.destinationURL,
-                                logicalPath: item.logicalPath,
-                                sourceId: item.sourceId
-                            )
-                        } catch {
-                            print("Reconcile parallel error for \(item.logicalPath): \(error)")
+            // Phase 1: Sync all ready local files with maximum concurrency!
+            if !readyItems.isEmpty {
+                await withTaskGroup(of: Void.self) { group in
+                    var inFlight = 0
+                    for item in readyItems {
+                        guard !self.isQueuePaused, !self.isLiveSyncPaused else { break }
+                        if inFlight >= maxConcurrent {
+                            await group.next()
+                            inFlight -= 1
+                        }
+                        inFlight += 1
+                        group.addTask {
+                            do {
+                                try await self.syncFileToDestination(
+                                    sourceURL: item.sourceURL,
+                                    destinationURL: item.destinationURL,
+                                    logicalPath: item.logicalPath,
+                                    sourceId: item.sourceId
+                                )
+                            } catch {
+                                print("Reconcile parallel error for \(item.logicalPath): \(error)")
+                                await MainActor.run {
+                                    self.lastErrorMessage = error.localizedDescription
+                                }
+                            }
+                        }
+                        
+                        completedCount += 1
+                        let now = Date()
+                        if now.timeIntervalSince(lastReportDate) >= 0.25 || completedCount == totalCount {
+                            lastReportDate = now
+                            let done = completedCount
+                            let currentName = item.sourceURL.lastPathComponent
                             await MainActor.run {
-                                self.lastErrorMessage = error.localizedDescription
+                                self.syncProgress.filesCompleted = done
+                                self.syncProgress.filesPending = max(0, totalCount - done)
+                                self.syncProgress.currentFileName = currentName
+                                self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalCount))..."
                             }
                         }
                     }
-                    
-                    completedCount += 1
-                    let now = Date()
-                    if now.timeIntervalSince(lastReportDate) >= 0.35 || completedCount == totalCount {
-                        lastReportDate = now
-                        let done = completedCount
-                        let currentName = item.sourceURL.lastPathComponent
-                        await MainActor.run {
-                            self.syncProgress.filesCompleted = done
-                            self.syncProgress.filesPending = max(0, totalCount - done)
-                            self.syncProgress.currentFileName = currentName
-                            self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalCount))..."
-                        }
-                    }
+                    await group.waitForAll()
                 }
-                await group.waitForAll()
-                self.flushLiveSyncProgress()
             }
             
+            // Phase 2: Process iCloud files as they arrive
+            if !iCloudPendingItems.isEmpty {
+                var remainingICloud = iCloudPendingItems
+                let maxWaitRounds = 30 // Poll for up to ~30-45s actively
+                var round = 0
+                
+                while !remainingICloud.isEmpty && round < maxWaitRounds {
+                    guard !self.isQueuePaused, !self.isLiveSyncPaused else { break }
+                    round += 1
+                    
+                    var downloadedNow: [PendingSyncItem] = []
+                    var stillPending: [PendingSyncItem] = []
+                    
+                    for item in remainingICloud {
+                        if !self.iCloudManager.isDatalessICloudItem(at: item.sourceURL) {
+                            downloadedNow.append(item)
+                        } else {
+                            stillPending.append(item)
+                        }
+                    }
+                    
+                    if !downloadedNow.isEmpty {
+                        await withTaskGroup(of: Void.self) { group in
+                            var inFlight = 0
+                            for item in downloadedNow {
+                                guard !self.isQueuePaused, !self.isLiveSyncPaused else { break }
+                                if inFlight >= maxConcurrent {
+                                    await group.next()
+                                    inFlight -= 1
+                                }
+                                inFlight += 1
+                                group.addTask {
+                                    do {
+                                        try await self.syncFileToDestination(
+                                            sourceURL: item.sourceURL,
+                                            destinationURL: item.destinationURL,
+                                            logicalPath: item.logicalPath,
+                                            sourceId: item.sourceId
+                                        )
+                                    } catch {
+                                        print("iCloud item sync error for \(item.logicalPath): \(error)")
+                                    }
+                                }
+                                
+                                completedCount += 1
+                                let now = Date()
+                                if now.timeIntervalSince(lastReportDate) >= 0.25 || completedCount == totalCount {
+                                    lastReportDate = now
+                                    let done = completedCount
+                                    let currentName = item.sourceURL.lastPathComponent
+                                    await MainActor.run {
+                                        self.syncProgress.filesCompleted = done
+                                        self.syncProgress.filesPending = max(0, totalCount - done)
+                                        self.syncProgress.currentFileName = currentName
+                                        self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalCount))..."
+                                    }
+                                }
+                            }
+                            await group.waitForAll()
+                        }
+                    }
+                    
+                    remainingICloud = stillPending
+                    if remainingICloud.isEmpty {
+                        break
+                    }
+                    
+                    let remCount = remainingICloud.count
+                    await MainActor.run {
+                        self.syncProgress.statusDescription = "Downloading \(remCount) files from iCloud..."
+                    }
+                    
+                    // Re-trigger downloads in case macOS paused any
+                    if round % 5 == 0 {
+                        for item in remainingICloud {
+                            self.iCloudManager.triggerDownload(at: item.sourceURL)
+                        }
+                    }
+                    
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                }
+                
+                if !remainingICloud.isEmpty {
+                    self.iCloudSkippedCount += remainingICloud.count
+                }
+            }
+            
+            self.flushLiveSyncProgress()
             self.database.flushIndex()
             await MainActor.run {
                 self.historyRevision += 1
@@ -1767,7 +1886,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     // MARK: - Path Resolving Helpers
     
     public static let ignoredFolderNames: Set<String> = [
-        "node_modules", ".git", ".build", "build", "dist", "out", "DerivedData", "vendor", "Pods", "__pycache__", ".next", ".nuxt", ".cache", ".turbo", ".venv", "venv", "target"
+        "node_modules", ".git", ".build", "DerivedData", "Pods", "__pycache__", ".next", ".nuxt", ".cache", ".turbo", ".venv", "venv"
     ]
     
     public func isPathIgnored(relPath: String) -> Bool {

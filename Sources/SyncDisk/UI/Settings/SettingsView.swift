@@ -387,10 +387,10 @@ public struct SettingsView: View {
                     }
                     
                     HStack {
-                        Text("Database Engine")
+                        Text("Index Engine")
                             .font(.system(size: 12))
                         Spacer()
-                        Text("SQLite 3 (WAL Mode)")
+                        Text("File-Based (JSON + Flat Files)")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                     }

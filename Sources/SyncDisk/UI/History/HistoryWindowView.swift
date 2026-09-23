@@ -472,7 +472,7 @@ public final class HistoryWindowViewModel: ObservableObject {
     private var lastRevisionRefresh = Date.distantPast
     public func refreshFileListThrottled(syncEngine: SyncEngine) {
         let now = Date()
-        guard now.timeIntervalSince(lastRevisionRefresh) >= 4.0 else { return }
+        guard now.timeIntervalSince(lastRevisionRefresh) >= 1.0 else { return }
         lastRevisionRefresh = now
         refreshFileList(syncEngine: syncEngine)
     }
@@ -748,28 +748,26 @@ public final class HistoryWindowViewModel: ObservableObject {
         var folderLatestDate: [String: Date] = [:]
         var folderHasActiveFiles: [String: Bool] = [:]
 
-        if currentFilter != .history {
-            for dirPath in knownDirectoryPaths {
-                let rel: String
-                if basePrefix.isEmpty {
-                    rel = dirPath
-                } else if dirPath.hasPrefix(basePrefix + "/") {
-                    rel = String(dirPath.dropFirst(basePrefix.count + 1))
-                } else {
-                    continue
-                }
-                let parts = rel.split(separator: "/")
-                guard let firstPartSub = parts.first else { continue }
-                let firstPart = String(firstPartSub)
-                if firstPart.lowercased().hasSuffix(".app") || firstPart == basePrefix || firstPart.isEmpty {
-                    continue
-                }
-                immediateFolderNames.insert(firstPart)
-                if parts.count > 1 {
-                    let secondPart = String(parts[1])
-                    if !secondPart.lowercased().hasSuffix(".app") && !secondPart.isEmpty {
-                        folderSubfolders[firstPart, default: []].insert(secondPart)
-                    }
+        for dirPath in knownDirectoryPaths {
+            let rel: String
+            if basePrefix.isEmpty {
+                rel = dirPath
+            } else if dirPath.hasPrefix(basePrefix + "/") {
+                rel = String(dirPath.dropFirst(basePrefix.count + 1))
+            } else {
+                continue
+            }
+            let parts = rel.split(separator: "/")
+            guard let firstPartSub = parts.first else { continue }
+            let firstPart = String(firstPartSub)
+            if firstPart.lowercased().hasSuffix(".app") || firstPart == basePrefix || firstPart.isEmpty {
+                continue
+            }
+            immediateFolderNames.insert(firstPart)
+            if parts.count > 1 {
+                let secondPart = String(parts[1])
+                if !secondPart.lowercased().hasSuffix(".app") && !secondPart.isEmpty {
+                    folderSubfolders[firstPart, default: []].insert(secondPart)
                 }
             }
         }
@@ -859,8 +857,47 @@ public final class HistoryWindowViewModel: ObservableObject {
             let folderFullPath = basePrefix.isEmpty ? folderName : "\(basePrefix)/\(folderName)"
             let subs = folderSubfolders[folderName]?.count ?? 0
             let directs = folderDirectCount[folderName] ?? 0
-            let totalChildren = subs + directs
-            let latestDate = folderLatestDate[folderName] ?? Date()
+            var totalChildren = subs + directs
+            var latestDate = folderLatestDate[folderName] ?? Date()
+            
+            // Fallback: if a folder has 0 tracked children (files not yet synced / still downloading from iCloud),
+            // count direct children from the destination disk path so the UI shows real counts, not 0.
+            if totalChildren == 0 {
+                let fm = FileManager.default
+                var fallbackURL: URL? = nil
+                if let dest = syncEngine.config.syncDestination {
+                    let destFolder = dest.appendingPathComponent(folderFullPath)
+                    if fm.fileExists(atPath: destFolder.path) {
+                        fallbackURL = destFolder
+                    }
+                }
+                // For top-level unsynced sources not yet on dest, fall back to local source URL
+                if fallbackURL == nil, basePrefix.isEmpty,
+                   let source = syncEngine.config.sources.first(where: { $0.name == folderName }),
+                   fm.fileExists(atPath: source.url.path) {
+                    fallbackURL = source.url
+                }
+                if let scanURL = fallbackURL {
+                    var directChildren = 0
+                    if let contents = try? fm.contentsOfDirectory(
+                        at: scanURL,
+                        includingPropertiesForKeys: [.contentModificationDateKey],
+                        options: [.skipsHiddenFiles]
+                    ) {
+                        for item in contents {
+                            let name = item.lastPathComponent
+                            guard !name.hasPrefix("."),
+                                  !SyncEngine.ignoredFolderNames.contains(name) else { continue }
+                            directChildren += 1
+                            if let modDate = (try? item.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate),
+                               modDate > latestDate {
+                                latestDate = modDate
+                            }
+                        }
+                    }
+                    totalChildren = directChildren
+                }
+            }
             
             let hasActive = folderHasActiveFiles[folderName] ?? false
             let isDeleted: Bool = {
@@ -949,6 +986,12 @@ public final class HistoryWindowViewModel: ObservableObject {
         
         for file in sortedFiles {
             result.append(.file(file))
+        }
+        
+        // In History mode, if no direct children match at the root/current level, fall back to showing all historical files directly
+        if currentFilter == .history && result.isEmpty && !trackedFiles.isEmpty {
+            self.displayedItems = trackedFiles.map { FileManagerGridItem.file($0) }
+            return
         }
         
         self.displayedItems = result

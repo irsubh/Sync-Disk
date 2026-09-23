@@ -15,6 +15,7 @@ public final class HistoricalInspectorViewModel: ObservableObject {
     @Published public var restoreSuccessMessage: String?
     @Published public var restoreErrorMessage: String?
     @Published public var copiedHashFeedback: Bool = false
+    @Published public var folderVersions: [FolderHistoryVersion] = []
     
     public init() {}
 }
@@ -88,6 +89,20 @@ public struct HistoricalInspectorView: View {
         }
         .frame(minWidth: 280, idealWidth: 340, maxWidth: 520)
         .background(Color(nsColor: .textBackgroundColor))
+        .task(id: folder?.path) {
+            guard let f = folder else {
+                vm.folderVersions = []
+                return
+            }
+            let path = f.path
+            let db = syncEngine.database
+            let vers = await Task.detached(priority: .userInitiated) {
+                return db.folderHistory(for: path)
+            }.value
+            await MainActor.run {
+                self.vm.folderVersions = vers
+            }
+        }
         .onChange(of: entry?.id) { _, _ in
             vm.isMediaPlaying = false
             loadPreview()
@@ -321,7 +336,7 @@ public struct HistoricalInspectorView: View {
     
     @ViewBuilder
     private func folderTimelineSection(folder: FolderDisplayItem) -> some View {
-        let versions = syncEngine.database.folderHistory(for: folder.path)
+        let versions = vm.folderVersions
         if !versions.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text("FOLDER HISTORY")

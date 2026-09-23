@@ -731,11 +731,11 @@ public final class HistoryDatabase: @unchecked Sendable {
         }
         allHistDates.sort()
         
-        // Cluster dates within 5 seconds into single historical versions
+        // Cluster dates within 60 seconds into milestone folder versions, and cap to most recent 20
         var distinctHistDates: [Date] = []
         for d in allHistDates {
             if let last = distinctHistDates.last {
-                if abs(d.timeIntervalSince(last)) > 5.0 {
+                if abs(d.timeIntervalSince(last)) > 60.0 {
                     distinctHistDates.append(d)
                 }
             } else {
@@ -743,8 +743,10 @@ public final class HistoryDatabase: @unchecked Sendable {
             }
         }
         
+        let cappedHistDates = Array(distinctHistDates.suffix(20))
+        
         // If there are no historical archives or snapshots, the folder has only 1 version (Current)
-        if distinctHistDates.isEmpty {
+        if cappedHistDates.isEmpty {
             return [
                 FolderHistoryVersion(
                     path: cleanPrefix,
@@ -758,21 +760,28 @@ public final class HistoryDatabase: @unchecked Sendable {
             ]
         }
         
+        // Pre-sort each file's history entries once, descending by timestamp (O(N log K))
+        var sortedFiles: [[FileHistoryEntry]] = []
+        sortedFiles.reserveCapacity(folderEntriesByPath.count)
+        for (_, vers) in folderEntriesByPath {
+            sortedFiles.append(vers.sorted(by: { $0.timestamp > $1.timestamp }))
+        }
+        
         // Check if the current timestamp is essentially the latest historical date
-        let latestHistDate = distinctHistDates.last
+        let latestHistDate = cappedHistDates.last
         let currentIsSeparateVersion: Bool = {
             guard let lastD = latestHistDate else { return true }
-            return abs(currentTimestamp.timeIntervalSince(lastD)) > 5.0
+            return abs(currentTimestamp.timeIntervalSince(lastD)) > 30.0
         }()
         
         var result: [FolderHistoryVersion] = []
-        for (idx, date) in distinctHistDates.enumerated() {
+        for (idx, date) in cappedHistDates.enumerated() {
             let verNum = idx + 1
             var activeCountAtDate = 0
             var allDeletedAtDate = true
             
-            for (_, vers) in folderEntriesByPath {
-                if let latestAtDate = vers.filter({ $0.timestamp <= date }).sorted(by: { $0.timestamp > $1.timestamp }).first {
+            for vers in sortedFiles {
+                if let latestAtDate = vers.first(where: { $0.timestamp <= date }) {
                     if latestAtDate.changeType != .deleted {
                         activeCountAtDate += 1
                         allDeletedAtDate = false
@@ -780,7 +789,7 @@ public final class HistoryDatabase: @unchecked Sendable {
                 }
             }
             
-            let isLastHist = (idx == distinctHistDates.count - 1)
+            let isLastHist = (idx == cappedHistDates.count - 1)
             let isCurrent = isLastHist && !currentIsSeparateVersion
             let changeType: ChangeType = allDeletedAtDate ? .deleted : (idx == 0 ? .created : .modified)
             
@@ -796,7 +805,7 @@ public final class HistoryDatabase: @unchecked Sendable {
         }
         
         if currentIsSeparateVersion {
-            let curVerNum = distinctHistDates.count + 1
+            let curVerNum = cappedHistDates.count + 1
             let curChange: ChangeType = currentActiveCount == 0 ? .deleted : .modified
             result.append(FolderHistoryVersion(
                 path: cleanPrefix,

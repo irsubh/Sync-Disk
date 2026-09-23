@@ -89,7 +89,7 @@ public final class HistoryStorageManager: @unchecked Sendable {
     
     // MARK: - SHA-256 Checksum Calculation
     
-    /// Streams file in 64KB chunks to safely hash arbitrarily large files without high memory usage.
+    /// Streams file in 1MB chunks to safely hash arbitrarily large files with maximum I/O throughput.
     public func computeSHA256(for fileURL: URL) throws -> String {
         guard fileManager.fileExists(atPath: fileURL.path) else {
             throw StorageError.fileNotFound(fileURL.path)
@@ -99,7 +99,7 @@ public final class HistoryStorageManager: @unchecked Sendable {
         defer { try? handle.close() }
         
         var hasher = SHA256()
-        let bufferSize = 64 * 1024
+        let bufferSize = 1024 * 1024 // 1 MB buffer for high-throughput sequential reading
         
         while autoreleasepool(invoking: {
             let chunk = handle.readData(ofLength: bufferSize)
@@ -204,14 +204,8 @@ public final class HistoryStorageManager: @unchecked Sendable {
                 throw StorageError.verificationFailed("Mirror staging size mismatch")
             }
             
-            let stagingSHA = try computeSHA256(for: stagingURL)
-            guard stagingSHA == sourceSHA else {
-                try? fileManager.removeItem(at: stagingURL)
-                throw StorageError.verificationFailed("Mirror staging SHA mismatch")
-            }
-            
             if fileManager.fileExists(atPath: destinationFileURL.path) {
-                try? fileManager.removeItem(at: destinationFileURL)
+                try fileManager.removeItem(at: destinationFileURL)
             }
             try fileManager.moveItem(at: stagingURL, to: destinationFileURL)
             

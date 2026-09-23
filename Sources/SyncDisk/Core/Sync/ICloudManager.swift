@@ -46,24 +46,27 @@ public final class ICloudManager: @unchecked Sendable {
         u.removeAllCachedResourceValues()
         if let values = try? u.resourceValues(forKeys: [
             .isUbiquitousItemKey,
-            .ubiquitousItemDownloadingStatusKey
+            .ubiquitousItemDownloadingStatusKey,
+            .ubiquitousItemIsDownloadingKey
         ]) {
-            if let status = values.ubiquitousItemDownloadingStatus {
-                return status != .current
+            if values.ubiquitousItemIsDownloading == true {
+                return true
             }
-            if values.isUbiquitousItem == true {
-                // If ubiquitous item has size 0 and destination has data, treat as dataless
-                if let sizeVal = try? u.resourceValues(forKeys: [.fileSizeKey]), sizeVal.fileSize == 0 {
-                    return true
-                }
+            if let status = values.ubiquitousItemDownloadingStatus {
+                return status == .notDownloaded
             }
         }
         return false
     }
     
+    /// Triggers download of an iCloud ubiquitous item asynchronously without blocking or waiting.
+    public func triggerDownload(at url: URL) {
+        try? fileManager.startDownloadingUbiquitousItem(at: url)
+    }
+    
     /// Executes the full safe iCloud download lifecycle using an explicit state machine.
     /// Returns the final state reached (.downloaded or .failed).
-    public func ensureFileDownloaded(at url: URL, timeoutSeconds: TimeInterval = 45.0) async -> ICloudSyncState {
+    public func ensureFileDownloaded(at url: URL, timeoutSeconds: TimeInterval = 15.0) async -> ICloudSyncState {
         var u = url
         u.removeAllCachedResourceValues()
         guard isDatalessICloudItem(at: u) else {
@@ -77,12 +80,12 @@ public final class ICloudManager: @unchecked Sendable {
             try fileManager.startDownloadingUbiquitousItem(at: u)
             
             let start = Date()
-            var delayNanos: UInt64 = 100_000_000 // 100ms
+            var delayNanos: UInt64 = 80_000_000 // 80ms
             while Date().timeIntervalSince(start) < timeoutSeconds {
                 try await Task.sleep(nanoseconds: delayNanos)
                 u.removeAllCachedResourceValues()
                 
-                // If kernel flag cleared, file data is locally available
+                // If kernel flag cleared or status is downloaded/current, file data is locally available
                 if !isDatalessICloudItem(at: u) {
                     state = .downloaded
                     return state
@@ -94,7 +97,7 @@ public final class ICloudManager: @unchecked Sendable {
                     state = .downloaded
                     return state
                 }
-                delayNanos = min(500_000_000, delayNanos + 50_000_000)
+                delayNanos = min(300_000_000, delayNanos + 40_000_000)
             }
             
             // Timeout reached
