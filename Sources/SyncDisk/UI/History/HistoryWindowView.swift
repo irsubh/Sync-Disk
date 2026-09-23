@@ -427,10 +427,24 @@ public final class HistoryWindowViewModel: ObservableObject {
             }
 
             // 4. Global counts (permanent across ALL sources — never dropped when selecting a source)
-            let historyPaths = Set(historyFiles.map { $0.logicalPath })
             let globalActiveCount = allLivePathsSet.count
-            let globalDeletedCount = historyPaths.filter { !allLivePathsSet.contains($0) }.count
-            let globalTotalCount = allLivePathsSet.union(historyPaths).count
+            // History count = unique files that have:
+            //   • versionCount > 1 → was modified at least once → old copy archived in .backup
+            //   • OR: gone from disk AND is not just a directory entry → fully deleted
+            var historyPathsSeen = Set<String>()
+            var historyCount = 0
+            for file in historyFiles {
+                guard !historyPathsSeen.contains(file.logicalPath) else { continue }
+                historyPathsSeen.insert(file.logicalPath)
+                let isDeletedFromDisk = !allLivePathsSet.contains(file.logicalPath)
+                    && !allDirectoriesSet.contains(file.logicalPath)
+                let hasArchivedVersions = file.versionCount > 1
+                if isDeletedFromDisk || hasArchivedVersions {
+                    historyCount += 1
+                }
+            }
+            let globalDeletedCount = historyCount
+            let globalTotalCount = allLivePathsSet.union(Set(historyFiles.map { $0.logicalPath })).count
 
             let finalFiles = liveFilesForView
             let finalDirectories = allDirectoriesSet
