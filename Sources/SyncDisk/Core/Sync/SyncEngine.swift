@@ -57,9 +57,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         defer { handledPathsLock.unlock() }
         guard let entry = recentlyHandledPaths[logicalPath] else { return false }
         if Date().timeIntervalSince(entry.date) < 15.0 {
-            if entry.size == currentSize && abs(entry.mtime.timeIntervalSince(currentMtime)) < 2.0 {
-                return true
-            }
+            return true
         }
         return false
     }
@@ -296,7 +294,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                         
                         // Check dataless iCloud item guard
                         if self.iCloudManager.isDatalessICloudItem(at: url) {
-                            if let existing = try? self.database.latestVersion(for: logicalPath, sourceId: source.id), existing.fileSize > 0 {
+                            let destFileExists = self.fileManager.fileExists(atPath: destFileURL.path)
+                            if destFileExists || (try? self.database.latestVersion(for: logicalPath, sourceId: source.id)) != nil {
                                 // Already recorded in history & mirror; dataless transition must not trigger download loop
                                 continue
                             }
@@ -400,6 +399,17 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         // 2. iCloud State Machine Handling
         var iCloudState: ICloudSyncState = .notDownloaded
         if iCloudManager.isDatalessICloudItem(at: sourceURL) {
+            // Fast skip: If destination already exists with data, no need to download from iCloud
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                let destAttrs = try? fileManager.attributesOfItem(atPath: destinationURL.path)
+                let destSize = (destAttrs?[.size] as? NSNumber)?.int64Value ?? 0
+                if destSize > 0 {
+                    self.markPathHandled(logicalPath: logicalPath, size: destSize, mtime: now)
+                    try? database.updateJournalState(id: journalId, state: .committed)
+                    return
+                }
+            }
+            
             await MainActor.run {
                 self.syncProgress.statusDescription = "Downloading \(originalFilename) from iCloud..."
             }
@@ -407,7 +417,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             
             if iCloudState == .failed {
                 try database.updateJournalState(id: journalId, state: .failed)
-                throw NSError(domain: "SyncEngine", code: 408, userInfo: [NSLocalizedDescriptionKey: "iCloud file failed to download: \(sourceURL.lastPathComponent)"])
+                print("iCloud file download pending/deferred for: \(sourceURL.lastPathComponent)")
+                return
             }
         }
         
@@ -724,6 +735,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 self.engineState = .scanning
                 self.syncProgress.isSyncing = true
                 self.syncProgress.statusDescription = "Reconciling changes..."
+                self.lastErrorMessage = nil
             }
             
             await self.reconcileAllSourcesInternal()
@@ -733,6 +745,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 self.syncProgress.isSyncing = false
                 self.syncProgress.statusDescription = "Idle — Everything up to date"
                 self.isReconciling = false
+                self.lastErrorMessage = nil
             }
             self.refreshDiskStatus(force: false)
         }
@@ -787,12 +800,31 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 let latestVersion = try? database.latestVersion(for: logicalPath, sourceId: src.id)
                 
                 if destExists {
-                    let srcAttrs = try? fileManager.attributesOfItem(atPath: fileURL.path)
                     let destAttrs = try? fileManager.attributesOfItem(atPath: destFileURL.path)
-                    let srcSize = (srcAttrs?[.size] as? NSNumber)?.int64Value ?? 0
                     let destSize = (destAttrs?[.size] as? NSNumber)?.int64Value ?? 0
-                    let srcDate = srcAttrs?[.modificationDate] as? Date
                     let destDate = destAttrs?[.modificationDate] as? Date
+                    
+                    // Dataless iCloud check: If file is dataless locally in iCloud, and ALREADY backed up to destination:
+                    if iCloudManager.isDatalessICloudItem(at: fileURL) {
+                        if latestVersion == nil && destSize > 0 {
+                            try? database.recordVersion(
+                                sourceId: src.id,
+                                logicalPath: logicalPath,
+                                originalFilename: filename,
+                                timestamp: destDate ?? Date(),
+                                changeType: .created,
+                                previousPath: nil,
+                                fileSize: destSize,
+                                sha256: "",
+                                historyRelativePath: "\(src.name)/\(relPath)"
+                            )
+                        }
+                        continue
+                    }
+                    
+                    let srcAttrs = try? fileManager.attributesOfItem(atPath: fileURL.path)
+                    let srcSize = (srcAttrs?[.size] as? NSNumber)?.int64Value ?? 0
+                    let srcDate = srcAttrs?[.modificationDate] as? Date
                     
                     let isIdentical = (srcSize == destSize) && (srcDate == nil || destDate == nil || destDate! >= srcDate! || abs(destDate!.timeIntervalSince(srcDate!)) < 2.0)
                     

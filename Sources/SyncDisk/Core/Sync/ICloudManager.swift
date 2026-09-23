@@ -33,28 +33,37 @@ public final class ICloudManager: @unchecked Sendable {
     
     /// Checks if a file is an iCloud file that is currently not downloaded locally (dataless placeholder).
     public func isDatalessICloudItem(at url: URL) -> Bool {
+        // 1. Kernel-level BSD SF_DATALESS flag check (fastest and most accurate on macOS APFS)
+        var statBuf = stat()
+        if lstat(url.path, &statBuf) == 0 {
+            if (statBuf.st_flags & 0x40000000) != 0 {
+                return true
+            }
+        }
+        
+        // 2. ResourceValues check
         var u = url
         u.removeAllCachedResourceValues()
-        guard let values = try? u.resourceValues(forKeys: [
+        if let values = try? u.resourceValues(forKeys: [
             .isUbiquitousItemKey,
             .ubiquitousItemDownloadingStatusKey
-        ]) else {
-            return false
-        }
-        
-        guard values.isUbiquitousItem == true else {
-            return false
-        }
-        
-        if let status = values.ubiquitousItemDownloadingStatus {
-            return status != .current
+        ]) {
+            if let status = values.ubiquitousItemDownloadingStatus {
+                return status != .current
+            }
+            if values.isUbiquitousItem == true {
+                // If ubiquitous item has size 0 and destination has data, treat as dataless
+                if let sizeVal = try? u.resourceValues(forKeys: [.fileSizeKey]), sizeVal.fileSize == 0 {
+                    return true
+                }
+            }
         }
         return false
     }
     
     /// Executes the full safe iCloud download lifecycle using an explicit state machine.
     /// Returns the final state reached (.downloaded or .failed).
-    public func ensureFileDownloaded(at url: URL, timeoutSeconds: TimeInterval = 60.0) async -> ICloudSyncState {
+    public func ensureFileDownloaded(at url: URL, timeoutSeconds: TimeInterval = 45.0) async -> ICloudSyncState {
         var u = url
         u.removeAllCachedResourceValues()
         guard isDatalessICloudItem(at: u) else {
@@ -72,8 +81,16 @@ public final class ICloudManager: @unchecked Sendable {
             while Date().timeIntervalSince(start) < timeoutSeconds {
                 try await Task.sleep(nanoseconds: delayNanos)
                 u.removeAllCachedResourceValues()
+                
+                // If kernel flag cleared, file data is locally available
+                if !isDatalessICloudItem(at: u) {
+                    state = .downloaded
+                    return state
+                }
+                
                 if let values = try? u.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
-                   values.ubiquitousItemDownloadingStatus == .current {
+                   let status = values.ubiquitousItemDownloadingStatus,
+                   (status == .current || status == .downloaded) {
                     state = .downloaded
                     return state
                 }
