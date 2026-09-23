@@ -89,7 +89,7 @@ public final class FSEventsMonitor: @unchecked Sendable {
             &context,
             cfPaths,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.5,
+            0.2,
             FSEventStreamCreateFlags(flags)
         ) else {
             return

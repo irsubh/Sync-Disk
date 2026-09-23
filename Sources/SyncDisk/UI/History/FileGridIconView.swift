@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 public struct FolderDisplayItem: Identifiable, Hashable {
     public var id: String { path }
@@ -226,29 +227,53 @@ private struct FileGridCard: View {
         (file.filename as NSString).pathExtension.lowercased()
     }
     
-    private var isPreviewableFile: Bool {
-        let previewable: Set<String> = [
-            "png", "jpg", "jpeg", "heic", "webp", "gif", "tiff", "bmp", "icns", "ico",
-            "psd", "pdf", "svg", "mp4", "mov", "m4v", "mkv"
+    private var isAppBundle: Bool {
+        ext == "app"
+    }
+    
+    private var displayName: String {
+        if isAppBundle {
+            return (file.filename as NSString).deletingPathExtension
+        }
+        return file.filename
+    }
+    
+    private var isRasterImage: Bool {
+        let raster: Set<String> = [
+            "png", "jpg", "jpeg", "heic", "webp", "gif", "tiff", "bmp", "icns", "ico"
         ]
-        return previewable.contains(ext)
+        return raster.contains(ext)
     }
     
     var body: some View {
         VStack(spacing: 5) {
-            // Thumbnail / Icon (Mac-style continuous squircle corner radius, border, and elevation shadow)
+            // Thumbnail / Icon (Genuine Mac App Icon, Raster Squircle, or macOS System Icon)
             ZStack {
                 if let thumb = state.thumbnailImage {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 58, height: 58)
-                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
-                        )
-                        .shadow(color: Color.black.opacity(0.10), radius: 2, x: 0, y: 1)
+                    if isAppBundle {
+                        Image(nsImage: thumb)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 58, height: 58)
+                            .shadow(color: Color.black.opacity(0.14), radius: 2.5, x: 0, y: 1.5)
+                    } else if isRasterImage {
+                        Image(nsImage: thumb)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 58, height: 58)
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                            )
+                            .shadow(color: Color.black.opacity(0.10), radius: 2, x: 0, y: 1)
+                    } else {
+                        Image(nsImage: thumb)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 54, height: 54)
+                            .shadow(color: Color.black.opacity(0.10), radius: 1.5, x: 0, y: 1)
+                    }
                 } else {
                     fileTypeIcon
                         .frame(width: 58, height: 58)
@@ -256,8 +281,8 @@ private struct FileGridCard: View {
             }
             .frame(width: 64, height: 60)
             
-            // Filename
-            Text(file.filename)
+            // Filename (Mac style: hide .app extension for applications just like Finder)
+            Text(displayName)
                 .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
                 .foregroundColor(isSelected ? .white : .primary)
                 .lineLimit(2)
@@ -270,7 +295,7 @@ private struct FileGridCard: View {
                         .fill(isSelected ? Color.accentColor : Color.clear)
                 )
             
-            // Subtitle (Dimensions, Duration, or File Size)
+            // Subtitle (Dimensions, "Application", Duration, or File Size)
             Text(subtitleText)
                 .font(.system(size: 10))
                 .foregroundColor(subtitleColor)
@@ -302,39 +327,26 @@ private struct FileGridCard: View {
     }
     
     private var fileTypeIcon: some View {
-        let iconName: String
-        let color: Color
-        
-        switch ext {
-        case "png", "jpg", "jpeg", "heic", "webp", "gif", "svg", "psd":
-            iconName = "photo"
-            color = .accentColor
-        case "mp3", "m4a", "wav", "aac", "flac":
-            iconName = "music.note"
-            color = .pink
-        case "mp4", "mov", "m4v", "mkv":
-            iconName = "film"
-            color = .orange
-        case "pdf":
-            iconName = "doc.richtext"
-            color = .red
-        case "zip", "tar", "gz":
-            iconName = "archivebox"
-            color = .yellow
-        default:
-            iconName = "doc.text"
-            color = .secondary
+        let icon: NSImage
+        if let uti = UTType(filenameExtension: ext) {
+            icon = NSWorkspace.shared.icon(for: uti)
+        } else {
+            icon = NSWorkspace.shared.icon(for: .item)
         }
-        
-        return Image(systemName: iconName)
-            .font(.system(size: 38))
-            .foregroundColor(file.isCurrentDeleted ? .secondary.opacity(0.5) : color)
-            .shadow(color: Color.black.opacity(0.08), radius: 1, x: 0, y: 1)
+        icon.size = NSSize(width: 64, height: 64)
+        return Image(nsImage: icon)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 52, height: 52)
+            .shadow(color: Color.black.opacity(0.10), radius: 1.5, x: 0, y: 1)
     }
     
     private var subtitleText: String {
         if file.isCurrentDeleted {
             return "Deleted"
+        }
+        if isAppBundle {
+            return "Application"
         }
         if let dims = state.dimensionSubtitle {
             return dims
@@ -346,6 +358,9 @@ private struct FileGridCard: View {
         if file.isCurrentDeleted {
             return .red.opacity(0.8)
         }
+        if isAppBundle {
+            return .secondary.opacity(0.85)
+        }
         if state.dimensionSubtitle != nil {
             return Color.accentColor.opacity(0.85)
         }
@@ -354,12 +369,6 @@ private struct FileGridCard: View {
     
     @MainActor
     private func loadThumbnail() async {
-        guard isPreviewableFile else {
-            state.thumbnailImage = nil
-            state.dimensionSubtitle = nil
-            return
-        }
-        
         // Instant synchronous cache check: 0ms render
         if let cachedImg = ThumbnailCache.shared.cachedThumbnail(for: file.logicalPath) {
             state.thumbnailImage = cachedImg

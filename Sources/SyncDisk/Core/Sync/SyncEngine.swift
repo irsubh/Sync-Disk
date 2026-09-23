@@ -176,7 +176,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         fsMonitor.start(
             paths: activePaths,
             excludedPrefixes: excludedPrefixes,
-            debounce: max(0.5, config.debounceSeconds)
+            debounce: max(0.2, config.debounceSeconds)
         ) { [weak self] changedURLs in
             self?.handleFSEvents(changedURLs)
         }
@@ -257,6 +257,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             let histPath = self.config.effectiveHistoryURL?.standardizedFileURL.path
             
             var itemsToSync: [PendingSyncItem] = []
+            var didChangeFilesystem = false
             
             for url in urls {
                 let urlStd = url.standardizedFileURL.path
@@ -283,6 +284,80 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     if isDir.boolValue {
                         if !self.fileManager.fileExists(atPath: destFileURL.path) {
                             try? self.fileManager.createDirectory(at: destFileURL, withIntermediateDirectories: true)
+                            didChangeFilesystem = true
+                        } else {
+                            // Check for deleted items: items on destination mirror that no longer exist in source directory
+                            if let destContents = try? self.fileManager.contentsOfDirectory(at: destFileURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                                for destItem in destContents {
+                                    let itemName = destItem.lastPathComponent
+                                    if self.shouldIgnore(filename: itemName) { continue }
+                                    let correspondingSrcURL = url.appendingPathComponent(itemName)
+                                    if !self.fileManager.fileExists(atPath: correspondingSrcURL.path) {
+                                        let itemRel = relPath.isEmpty ? itemName : "\(relPath)/\(itemName)"
+                                        let itemLogical = "\(source.name)/\(itemRel)"
+                                        try? self.deleteFileFromDestination(destinationURL: destItem, logicalPath: itemLogical, sourceId: source.id)
+                                        didChangeFilesystem = true
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Recursively scan newly created/modified directory to catch all nested files and bundles
+                        if let enumerator = self.fileManager.enumerator(
+                            at: url,
+                            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
+                            options: [.skipsHiddenFiles]
+                        ) {
+                            while let subURL = enumerator.nextObject() as? URL {
+                                let subName = subURL.lastPathComponent
+                                guard !subName.hasPrefix("."), !self.shouldIgnore(filename: subName) else {
+                                    var subIsDir: ObjCBool = false
+                                    if self.fileManager.fileExists(atPath: subURL.path, isDirectory: &subIsDir), subIsDir.boolValue {
+                                        enumerator.skipDescendants()
+                                    }
+                                    continue
+                                }
+                                
+                                guard let (subSource, subRel) = self.resolveSource(for: subURL) else { continue }
+                                if self.isPathIgnored(relPath: subRel) { continue }
+                                let subDestFileURL = destBase.appendingPathComponent(subSource.name).appendingPathComponent(subRel)
+                                let subLogicalPath = "\(subSource.name)/\(subRel)"
+                                
+                                var subIsDir: ObjCBool = false
+                                if self.fileManager.fileExists(atPath: subURL.path, isDirectory: &subIsDir) {
+                                    if subIsDir.boolValue {
+                                        if !self.fileManager.fileExists(atPath: subDestFileURL.path) {
+                                            try? self.fileManager.createDirectory(at: subDestFileURL, withIntermediateDirectories: true)
+                                            didChangeFilesystem = true
+                                        }
+                                        continue
+                                    }
+                                    
+                                    // Regular file inside directory
+                                    let attrs = try? self.fileManager.attributesOfItem(atPath: subURL.path)
+                                    let currentSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+                                    let currentMtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                                    
+                                    if self.shouldIgnoreHandledEvent(logicalPath: subLogicalPath, currentSize: currentSize, currentMtime: currentMtime) {
+                                        continue
+                                    }
+                                    
+                                    if let destAttrs = try? self.fileManager.attributesOfItem(atPath: subDestFileURL.path) {
+                                        let destSize = (destAttrs[.size] as? NSNumber)?.int64Value ?? 0
+                                        let destMtime = (destAttrs[.modificationDate] as? Date) ?? Date.distantPast
+                                        if destSize == currentSize && abs(destMtime.timeIntervalSince(currentMtime)) < 2.0 {
+                                            continue
+                                        }
+                                    }
+                                    
+                                    itemsToSync.append(PendingSyncItem(
+                                        sourceURL: subURL,
+                                        destinationURL: subDestFileURL,
+                                        logicalPath: subLogicalPath,
+                                        sourceId: subSource.id
+                                    ))
+                                }
+                            }
                         }
                     } else {
                         // 2. Metadata-first check: Compare size & modDate
@@ -321,6 +396,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     }
                 } else {
                     try? self.deleteFileFromDestination(destinationURL: destFileURL, logicalPath: logicalPath, sourceId: source.id)
+                    didChangeFilesystem = true
                 }
             }
             
@@ -367,8 +443,13 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     self.syncProgress.statusDescription = "Idle — Everything up to date"
                 }
             } else {
+                let changed = didChangeFilesystem
                 await MainActor.run {
+                    if changed {
+                        self.historyRevision += 1
+                    }
                     self.engineState = .idle
+                    self.syncProgress.isSyncing = false
                 }
             }
             
@@ -562,31 +643,96 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             logicalPath: logicalPath
         )
         
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            let (relHistPath, histSHA, histSize) = try storageManager.archiveVersion(
-                sourceFileURL: destinationURL,
-                logicalPath: logicalPath,
-                timestamp: now,
-                database: database
-            )
-            
-            try fileManager.removeItem(at: destinationURL)
-            try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
-            let delVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
-            
-            let deleteEntry = FileHistoryEntry(
-                sourceId: sourceId,
-                logicalPath: logicalPath,
-                originalFilename: originalFilename,
-                timestamp: now,
-                changeType: .deleted,
-                fileSize: histSize,
-                sha256: histSHA,
-                historyRelativePath: relHistPath,
-                isCurrentVersion: false,
-                versionNumber: delVerNum
-            )
-            try database.insert(version: deleteEntry)
+        var isDestDir: ObjCBool = false
+        if fileManager.fileExists(atPath: destinationURL.path, isDirectory: &isDestDir) {
+            if isDestDir.boolValue {
+                // Before removing directory, recursively find all regular files inside it and archive each to history
+                if let enumerator = fileManager.enumerator(
+                    at: destinationURL,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) {
+                    let destPathPrefix = destinationURL.path
+                    while let subURL = enumerator.nextObject() as? URL {
+                        var isSubDir: ObjCBool = false
+                        guard fileManager.fileExists(atPath: subURL.path, isDirectory: &isSubDir), !isSubDir.boolValue else { continue }
+                        let subPath = subURL.path
+                        if subPath.hasPrefix(destPathPrefix) {
+                            var relInside = String(subPath.dropFirst(destPathPrefix.count))
+                            if relInside.hasPrefix("/") { relInside.removeFirst() }
+                            let subLogicalPath = "\(logicalPath)/\(relInside)"
+                            let subFilename = subURL.lastPathComponent
+                            
+                            if let (relHistPath, histSHA, histSize) = try? storageManager.archiveVersion(
+                                sourceFileURL: subURL,
+                                logicalPath: subLogicalPath,
+                                timestamp: now,
+                                database: database
+                            ) {
+                                try? database.markPreviousVersionsNotCurrent(logicalPath: subLogicalPath, sourceId: sourceId)
+                                if let delVerNum = try? database.nextVersionNumber(for: subLogicalPath, sourceId: sourceId) {
+                                    let deleteEntry = FileHistoryEntry(
+                                        sourceId: sourceId,
+                                        logicalPath: subLogicalPath,
+                                        originalFilename: subFilename,
+                                        timestamp: now,
+                                        changeType: .deleted,
+                                        fileSize: histSize,
+                                        sha256: histSHA,
+                                        historyRelativePath: relHistPath,
+                                        isCurrentVersion: false,
+                                        versionNumber: delVerNum
+                                    )
+                                    try? database.insert(version: deleteEntry)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                try fileManager.removeItem(at: destinationURL)
+                try? database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
+                if let delVerNum = try? database.nextVersionNumber(for: logicalPath, sourceId: sourceId) {
+                    let deleteEntry = FileHistoryEntry(
+                        sourceId: sourceId,
+                        logicalPath: logicalPath,
+                        originalFilename: originalFilename,
+                        timestamp: now,
+                        changeType: .deleted,
+                        fileSize: 0,
+                        sha256: "",
+                        historyRelativePath: "",
+                        isCurrentVersion: false,
+                        versionNumber: delVerNum
+                    )
+                    try? database.insert(version: deleteEntry)
+                }
+            } else {
+                let (relHistPath, histSHA, histSize) = try storageManager.archiveVersion(
+                    sourceFileURL: destinationURL,
+                    logicalPath: logicalPath,
+                    timestamp: now,
+                    database: database
+                )
+                
+                try fileManager.removeItem(at: destinationURL)
+                try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
+                let delVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
+                
+                let deleteEntry = FileHistoryEntry(
+                    sourceId: sourceId,
+                    logicalPath: logicalPath,
+                    originalFilename: originalFilename,
+                    timestamp: now,
+                    changeType: .deleted,
+                    fileSize: histSize,
+                    sha256: histSHA,
+                    historyRelativePath: relHistPath,
+                    isCurrentVersion: false,
+                    versionNumber: delVerNum
+                )
+                try database.insert(version: deleteEntry)
+            }
         } else {
             try database.markPreviousVersionsNotCurrent(logicalPath: logicalPath, sourceId: sourceId)
             let delVerNum = try database.nextVersionNumber(for: logicalPath, sourceId: sourceId)
@@ -876,6 +1022,63 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     logicalPath: logicalPath,
                     sourceId: src.id
                 ))
+            }
+            
+            // Check for locally deleted files and directories on destination mirror
+            let destSrcFolder = destBase.appendingPathComponent(source.name)
+            if fileManager.fileExists(atPath: destSrcFolder.path),
+               let destEnumerator = fileManager.enumerator(
+                at: destSrcFolder,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+               ) {
+                var itemsToDelete: [(url: URL, rel: String)] = []
+                let destSrcPath = destSrcFolder.path
+                
+                while let destURL = destEnumerator.nextObject() as? URL {
+                    guard !isQueuePaused else { break }
+                    let name = destURL.lastPathComponent
+                    if shouldIgnore(filename: name) {
+                        var isD: ObjCBool = false
+                        if fileManager.fileExists(atPath: destURL.path, isDirectory: &isD), isD.boolValue {
+                            destEnumerator.skipDescendants()
+                        }
+                        continue
+                    }
+                    
+                    let path = destURL.path
+                    guard path.hasPrefix(destSrcPath) else { continue }
+                    var rel = String(path.dropFirst(destSrcPath.count))
+                    if rel.hasPrefix("/") { rel.removeFirst() }
+                    guard !rel.isEmpty else { continue }
+                    
+                    if isPathIgnored(relPath: rel) {
+                        var isD: ObjCBool = false
+                        if fileManager.fileExists(atPath: destURL.path, isDirectory: &isD), isD.boolValue {
+                            destEnumerator.skipDescendants()
+                        }
+                        continue
+                    }
+                    
+                    let expectedSrcURL = source.url.appendingPathComponent(rel)
+                    if !fileManager.fileExists(atPath: expectedSrcURL.path) {
+                        itemsToDelete.append((destURL, rel))
+                        var isD: ObjCBool = false
+                        if fileManager.fileExists(atPath: destURL.path, isDirectory: &isD), isD.boolValue {
+                            destEnumerator.skipDescendants()
+                        }
+                    }
+                }
+                
+                if !itemsToDelete.isEmpty {
+                    for (delURL, delRel) in itemsToDelete {
+                        let logical = "\(source.name)/\(delRel)"
+                        try? deleteFileFromDestination(destinationURL: delURL, logicalPath: logical, sourceId: source.id)
+                    }
+                    await MainActor.run {
+                        self.historyRevision += 1
+                    }
+                }
             }
             
             guard !itemsToSync.isEmpty else { continue }

@@ -65,6 +65,19 @@ public final class ThumbnailCache: @unchecked Sendable {
             var generatedImage: NSImage? = nil
             
             let ext = fileURL.pathExtension.lowercased()
+            let isApp = ext == "app" || (try? fileURL.resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
+            
+            if isApp {
+                let icon = NSWorkspace.shared.icon(forFile: fileURL.path)
+                icon.size = NSSize(width: maxPixelSize, height: maxPixelSize)
+                self.imageCache.setObject(icon, forKey: cacheKey as NSString)
+                self.dimensionCache.setObject("Application" as NSString, forKey: cacheKey as NSString)
+                DispatchQueue.main.async {
+                    completion(icon, "Application")
+                }
+                return
+            }
+            
             let isRasterImage = ["png", "jpg", "jpeg", "heic", "webp", "gif", "tiff", "bmp", "icns", "ico"].contains(ext)
             
             if isRasterImage {
@@ -112,10 +125,12 @@ public final class ThumbnailCache: @unchecked Sendable {
                         representationTypes: .thumbnail
                     )
                     QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { rep, _ in
-                        let img = rep?.nsImage
-                        if let img = img {
-                            self.imageCache.setObject(img, forKey: cacheKey as NSString)
-                        }
+                        let img = rep?.nsImage ?? {
+                            let sysIcon = NSWorkspace.shared.icon(forFile: fileURL.path)
+                            sysIcon.size = NSSize(width: maxPixelSize, height: maxPixelSize)
+                            return sysIcon
+                        }()
+                        self.imageCache.setObject(img, forKey: cacheKey as NSString)
                         DispatchQueue.main.async {
                             completion(img, extractedDims)
                         }
@@ -129,7 +144,7 @@ public final class ThumbnailCache: @unchecked Sendable {
                     completion(finalImage, finalDims)
                 }
             } else {
-                // For PSD, PDF, Video, Vector, or other documents: use native QuickLook Thumbnailing
+                // For PSD, PDF, Video, Vector, or other documents: use native QuickLook Thumbnailing with NSWorkspace icon fallback
                 let request = QLThumbnailGenerator.Request(
                     fileAt: fileURL,
                     size: CGSize(width: maxPixelSize, height: maxPixelSize),
@@ -138,10 +153,12 @@ public final class ThumbnailCache: @unchecked Sendable {
                 )
                 
                 QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { rep, _ in
-                    let img = rep?.nsImage
-                    if let img = img {
-                        self.imageCache.setObject(img, forKey: cacheKey as NSString)
-                    }
+                    let img = rep?.nsImage ?? {
+                        let sysIcon = NSWorkspace.shared.icon(forFile: fileURL.path)
+                        sysIcon.size = NSSize(width: maxPixelSize, height: maxPixelSize)
+                        return sysIcon
+                    }()
+                    self.imageCache.setObject(img, forKey: cacheKey as NSString)
                     DispatchQueue.main.async {
                         completion(img, extractedDims)
                     }

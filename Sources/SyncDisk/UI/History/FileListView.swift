@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 public struct FileListView: View {
     public let items: [FileManagerGridItem]
@@ -167,46 +168,54 @@ private struct FileRowView: View {
     
     @StateObject private var clickState = RowClickState()
     
+    private var ext: String {
+        (file.filename as NSString).pathExtension.lowercased()
+    }
+    
+    private var isAppBundle: Bool {
+        ext == "app"
+    }
+    
+    private var displayName: String {
+        if isAppBundle {
+            return (file.filename as NSString).deletingPathExtension
+        }
+        return file.filename
+    }
+    
     private var cleanPath: String {
         file.logicalPath.split(separator: "/").joined(separator: " / ")
     }
     
-    private var fileIcon: String {
-        let ext = (file.filename as NSString).pathExtension.lowercased()
-        switch ext {
-        case "png", "jpg", "jpeg", "heic", "webp", "gif", "svg":
-            return "photo"
-        case "mp3", "m4a", "wav", "aac", "flac", "aiff":
-            return "music.note"
-        case "mp4", "mov", "m4v", "mkv", "avi":
-            return "film"
-        case "pdf":
-            return "doc.richtext"
-        case "swift", "js", "ts", "py", "json", "html", "css", "md", "txt":
-            return "doc.text"
-        case "zip", "tar", "gz":
-            return "archivebox"
-        default:
-            return "doc"
+    private var fileIconImage: NSImage {
+        if let cached = ThumbnailCache.shared.cachedThumbnail(for: file.logicalPath) {
+            return cached
         }
+        let icon: NSImage
+        if let uti = UTType(filenameExtension: ext) {
+            icon = NSWorkspace.shared.icon(for: uti)
+        } else {
+            icon = NSWorkspace.shared.icon(for: .item)
+        }
+        icon.size = NSSize(width: 32, height: 32)
+        return icon
     }
     
     var body: some View {
         HStack(spacing: 12) {
-            // Icon
+            // Native macOS Icon
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(nsColor: .separatorColor).opacity(0.18))
-                    .frame(width: 32, height: 32)
-                
-                Image(systemName: fileIcon)
-                    .font(.system(size: 14))
-                    .foregroundColor(file.isCurrentDeleted ? .secondary.opacity(0.5) : (isSelected ? .accentColor : .secondary))
+                Image(nsImage: fileIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 28, height: 28)
+                    .opacity(file.isCurrentDeleted ? 0.5 : 1.0)
             }
+            .frame(width: 32, height: 32)
             
             // Name & Path
             VStack(alignment: .leading, spacing: 3) {
-                Text(file.filename)
+                Text(displayName)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
                     .foregroundColor(file.isCurrentDeleted ? .secondary : .primary)
                     .lineLimit(1)

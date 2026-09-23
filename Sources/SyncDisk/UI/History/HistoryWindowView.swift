@@ -67,9 +67,22 @@ public final class HistoryWindowViewModel: ObservableObject {
                     let name = url.lastPathComponent
                     // Skip hidden/system/build files
                     guard !name.hasPrefix("."),
-                          !SyncEngine.ignoredFolderNames.contains(name),
-                          (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-                    else { continue }
+                          !SyncEngine.ignoredFolderNames.contains(name) else {
+                        var isDir: ObjCBool = false
+                        if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                            enumerator?.skipDescendants()
+                        }
+                        continue
+                    }
+                    
+                    let isApp = url.pathExtension.lowercased() == "app" ||
+                                (try? url.resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
+                    if isApp {
+                        enumerator?.skipDescendants()
+                    } else {
+                        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+                    }
+                    
                     // Use relative logical path as key
                     let urlPath = url.standardizedFileURL.path
                     if urlPath.hasPrefix(destSrcStd) {
@@ -204,13 +217,20 @@ public final class HistoryWindowViewModel: ObservableObject {
                         
                         let logicalPath = "\(source.name)/\(rel)"
                         
+                        let isAppBundle = url.pathExtension.lowercased() == "app" ||
+                                          (try? url.resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
+                        
                         var isDir: ObjCBool = false
                         if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-                            allDirectoriesSet.insert(logicalPath)
-                            continue
+                            if isAppBundle {
+                                enumerator?.skipDescendants()
+                            } else {
+                                allDirectoriesSet.insert(logicalPath)
+                                continue
+                            }
+                        } else {
+                            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
                         }
-                        
-                        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
                         
                         allLivePathsSet.insert(logicalPath)
                         
@@ -266,7 +286,11 @@ public final class HistoryWindowViewModel: ObservableObject {
                     if parts.count > 1 {
                         var dirAccum = ""
                         for part in parts.dropLast() {
-                            dirAccum = dirAccum.isEmpty ? String(part) : "\(dirAccum)/\(part)"
+                            let partStr = String(part)
+                            if partStr.lowercased().hasSuffix(".app") {
+                                break
+                            }
+                            dirAccum = dirAccum.isEmpty ? partStr : "\(dirAccum)/\(partStr)"
                             allDirectoriesSet.insert(dirAccum)
                         }
                     }
@@ -492,11 +516,17 @@ public final class HistoryWindowViewModel: ObservableObject {
             }
             let parts = rel.split(separator: "/")
             if parts.count >= 1 {
-                immediateFolderNames.insert(String(parts[0]))
+                let firstPart = String(parts[0])
+                if firstPart.lowercased().hasSuffix(".app") {
+                    continue
+                }
+                immediateFolderNames.insert(firstPart)
             }
         }
         
         // Tracked files under basePrefix
+        var appBundlesAdded = Set<String>()
+        
         for file in trackedFiles {
             let rel: Substring
             if basePrefix.isEmpty {
@@ -512,8 +542,34 @@ public final class HistoryWindowViewModel: ObservableObject {
             
             let parts = rel.split(separator: "/")
             if parts.count > 1 {
-                immediateFolderNames.insert(String(parts[0]))
+                let firstPart = String(parts[0])
+                if firstPart.lowercased().hasSuffix(".app") {
+                    // It's an application bundle! Collapse all files inside it into a single application file item
+                    if !appBundlesAdded.contains(firstPart) {
+                        appBundlesAdded.insert(firstPart)
+                        let appLogicalPath = basePrefix.isEmpty ? firstPart : "\(basePrefix)/\(firstPart)"
+                        let appItem = TrackedFileInfo(
+                            logicalPath: appLogicalPath,
+                            originalFilename: firstPart,
+                            lastChangeType: file.lastChangeType,
+                            lastTimestamp: file.lastTimestamp,
+                            fileSize: file.fileSize,
+                            versionCount: file.versionCount,
+                            isDeleted: file.isDeleted
+                        )
+                        immediateFiles.append(appItem)
+                    }
+                    continue
+                }
+                immediateFolderNames.insert(firstPart)
             } else if parts.count == 1 {
+                let firstPart = String(parts[0])
+                if firstPart.lowercased().hasSuffix(".app") {
+                    if appBundlesAdded.contains(firstPart) {
+                        continue
+                    }
+                    appBundlesAdded.insert(firstPart)
+                }
                 immediateFiles.append(file)
             }
         }
@@ -535,15 +591,28 @@ public final class HistoryWindowViewModel: ObservableObject {
                     let subRel = String(dirPath.dropFirst(folderFullPath.count + 1))
                     let subParts = subRel.split(separator: "/")
                     if let firstSub = subParts.first {
-                        subfolderNames.insert(String(firstSub))
+                        let subStr = String(firstSub)
+                        if !subStr.lowercased().hasSuffix(".app") {
+                            subfolderNames.insert(subStr)
+                        }
                     }
                 }
             }
             
+            var countedAppsInFolder = Set<String>()
             for file in trackedFiles {
                 if file.logicalPath.hasPrefix(folderFullPath + "/") {
                     let subRel = String(file.logicalPath.dropFirst(folderFullPath.count + 1))
                     let subParts = subRel.split(separator: "/")
+                    if let firstSub = subParts.first, String(firstSub).lowercased().hasSuffix(".app") {
+                        let appName = String(firstSub)
+                        if !countedAppsInFolder.contains(appName) {
+                            countedAppsInFolder.insert(appName)
+                            directFileCount += 1
+                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
+                        }
+                        continue
+                    }
                     if subParts.count == 1 {
                         directFileCount += 1
                         if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
