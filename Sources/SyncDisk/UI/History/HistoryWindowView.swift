@@ -44,6 +44,31 @@ public final class HistoryWindowViewModel: ObservableObject {
     
     public init() {}
     
+    nonisolated public static func calculateItemSize(at url: URL) -> Int64 {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
+        
+        if !isDir.boolValue {
+            let vals = try? url.resourceValues(forKeys: [.totalFileSizeKey, .fileSizeKey])
+            return Int64(vals?.totalFileSize ?? vals?.fileSize ?? 0)
+        }
+        
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.totalFileSizeKey, .fileSizeKey, .isRegularFileKey],
+            options: []
+        ) else { return 0 }
+        
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .totalFileSizeKey, .fileSizeKey]),
+                  values.isRegularFile == true else { continue }
+            let sz = Int64(values.totalFileSize ?? values.fileSize ?? 0)
+            total += sz
+        }
+        return total
+    }
+    
     /// Counts all individual files across all source folders on destination disk (not just synced history).
     /// - totalCount:  all unique file paths (on destination + in history)
     /// - activeCount: files that exist on destination disk right now
@@ -250,17 +275,22 @@ public final class HistoryWindowViewModel: ObservableObject {
                                   logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
                         }
                         
-                        let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                        let fileSize = Int64(attrs?.fileSize ?? 0)
+                        let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .totalFileSizeKey, .contentModificationDateKey])
+                        var fileSize = Int64(attrs?.totalFileSize ?? attrs?.fileSize ?? 0)
                         let modDate = attrs?.contentModificationDate ?? Date()
                         
+                        if isAppBundle || (fileSize == 0 && isDir.boolValue) {
+                            fileSize = Self.calculateItemSize(at: url)
+                        }
+                        
                         if let hist = historyMap[logicalPath] {
+                            let chosenSize = (fileSize > 0) ? fileSize : hist.fileSize
                             liveFilesForView.append(TrackedFileInfo(
                                 logicalPath: logicalPath,
                                 originalFilename: name,
                                 lastChangeType: hist.lastChangeType,
                                 lastTimestamp: modDate,
-                                fileSize: fileSize > 0 ? fileSize : hist.fileSize,
+                                fileSize: chosenSize,
                                 versionCount: hist.versionCount,
                                 isDeleted: false
                             ))
@@ -372,10 +402,20 @@ public final class HistoryWindowViewModel: ObservableObject {
         refreshFileList(syncEngine: syncEngine)
     }
     
-    public func loadFileVersions(for path: String, database: HistoryDatabase) {
+    public func loadFileVersions(for path: String, database: HistoryDatabase, syncEngine: SyncEngine? = nil) {
         selectedFilePath = path
         do {
-            let vers = try database.history(for: path)
+            var vers = try database.history(for: path)
+            if let engine = syncEngine, let targetURL = engine.resolveURL(for: path) {
+                let realSize = Self.calculateItemSize(at: targetURL)
+                if realSize > 0 {
+                    for i in 0..<vers.count {
+                        if vers[i].fileSize == 0 || vers[i].originalFilename.lowercased().hasSuffix(".app") {
+                            vers[i].fileSize = realSize
+                        }
+                    }
+                }
+            }
             self.fileVersions = vers
             self.selectedVersion = vers.first(where: { $0.isCurrentVersion }) ?? vers.first
         } catch {
@@ -386,6 +426,14 @@ public final class HistoryWindowViewModel: ObservableObject {
         // If file has not been archived into database yet, create a live virtual entry
         // so the inspector still shows full file details, preview, and timeline!
         if self.selectedVersion == nil, let live = trackedFiles.first(where: { $0.logicalPath == path }) {
+            var liveSize = live.fileSize
+            if (liveSize == 0 || live.originalFilename.lowercased().hasSuffix(".app")),
+               let engine = syncEngine, let targetURL = engine.resolveURL(for: path) {
+                let realSize = Self.calculateItemSize(at: targetURL)
+                if realSize > 0 {
+                    liveSize = realSize
+                }
+            }
             let liveEntry = FileHistoryEntry(
                 id: UUID(),
                 sourceId: UUID(),
@@ -393,7 +441,7 @@ public final class HistoryWindowViewModel: ObservableObject {
                 originalFilename: live.originalFilename,
                 timestamp: live.lastTimestamp,
                 changeType: .created,
-                fileSize: live.fileSize,
+                fileSize: liveSize,
                 sha256: "",
                 historyRelativePath: "",
                 isCurrentVersion: true,
@@ -548,12 +596,20 @@ public final class HistoryWindowViewModel: ObservableObject {
                     if !appBundlesAdded.contains(firstPart) {
                         appBundlesAdded.insert(firstPart)
                         let appLogicalPath = basePrefix.isEmpty ? firstPart : "\(basePrefix)/\(firstPart)"
+                        var appSize: Int64 = 0
+                        if let appURL = syncEngine.resolveURL(for: appLogicalPath) {
+                            appSize = HistoryWindowViewModel.calculateItemSize(at: appURL)
+                        }
+                        if appSize == 0 {
+                            let subSum = trackedFiles.filter { $0.logicalPath.hasPrefix(appLogicalPath + "/") }.reduce(0) { $0 + $1.fileSize }
+                            appSize = subSum > 0 ? subSum : file.fileSize
+                        }
                         let appItem = TrackedFileInfo(
                             logicalPath: appLogicalPath,
                             originalFilename: firstPart,
                             lastChangeType: file.lastChangeType,
                             lastTimestamp: file.lastTimestamp,
-                            fileSize: file.fileSize,
+                            fileSize: appSize,
                             versionCount: file.versionCount,
                             isDeleted: file.isDeleted
                         )
@@ -569,6 +625,28 @@ public final class HistoryWindowViewModel: ObservableObject {
                         continue
                     }
                     appBundlesAdded.insert(firstPart)
+                    var appSize = file.fileSize
+                    if appSize == 0 || appSize < 1024 {
+                        if let appURL = syncEngine.resolveURL(for: file.logicalPath) {
+                            let diskSize = HistoryWindowViewModel.calculateItemSize(at: appURL)
+                            if diskSize > 0 { appSize = diskSize }
+                        }
+                        if appSize == 0 {
+                            let subSum = trackedFiles.filter { $0.logicalPath.hasPrefix(file.logicalPath + "/") }.reduce(0) { $0 + $1.fileSize }
+                            if subSum > 0 { appSize = subSum }
+                        }
+                    }
+                    let appItem = TrackedFileInfo(
+                        logicalPath: file.logicalPath,
+                        originalFilename: file.originalFilename,
+                        lastChangeType: file.lastChangeType,
+                        lastTimestamp: file.lastTimestamp,
+                        fileSize: appSize,
+                        versionCount: file.versionCount,
+                        isDeleted: file.isDeleted
+                    )
+                    immediateFiles.append(appItem)
+                    continue
                 }
                 immediateFiles.append(file)
             }
@@ -848,7 +926,7 @@ public struct HistoryWindowView: View {
                                         syncEngine: syncEngine,
                                         onSelectFile: { path in
                                             vm.selectedFolder = nil
-                                            vm.loadFileVersions(for: path, database: syncEngine.database)
+                                            vm.loadFileVersions(for: path, database: syncEngine.database, syncEngine: syncEngine)
                                         },
                                         onSelectFolder: { folder in
                                             vm.selectedFolder = folder
@@ -874,7 +952,7 @@ public struct HistoryWindowView: View {
                                         selectedFilePath: $vm.selectedFilePath,
                                         onSelectFile: { path in
                                             vm.selectedFolder = nil
-                                            vm.loadFileVersions(for: path, database: syncEngine.database)
+                                            vm.loadFileVersions(for: path, database: syncEngine.database, syncEngine: syncEngine)
                                         },
                                         onSelectFolder: { folder in
                                             vm.selectedFolder = folder

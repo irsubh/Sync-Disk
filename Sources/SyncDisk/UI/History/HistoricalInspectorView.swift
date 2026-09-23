@@ -238,7 +238,7 @@ public struct HistoricalInspectorView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 
-                Text("\(fileExtension.uppercased()) · \(ByteCountFormatter.string(fromByteCount: version.fileSize, countStyle: .file))")
+                Text("\(fileExtension.uppercased()) · \(ByteCountFormatter.string(fromByteCount: effectiveFileSize(for: version), countStyle: .file))")
                     .font(.system(size: 10.5))
                     .foregroundColor(.secondary.opacity(0.8))
             }
@@ -488,7 +488,7 @@ public struct HistoricalInspectorView: View {
                             .layoutPriority(10)
                     }
                     
-                    Text(ByteCountFormatter.string(fromByteCount: entry.fileSize, countStyle: .file))
+                    Text(ByteCountFormatter.string(fromByteCount: effectiveFileSize(for: entry), countStyle: .file))
                         .font(.system(size: 10))
                         .foregroundColor(.secondary.opacity(0.7))
                 }
@@ -514,7 +514,8 @@ public struct HistoricalInspectorView: View {
             content: {
                 VStack(alignment: .leading, spacing: 6) {
                     detailRow(label: "Path", value: version.logicalPath)
-                    detailRow(label: "Size", value: "\(version.fileSize) bytes")
+                    let effSize = effectiveFileSize(for: version)
+                    detailRow(label: "Size", value: "\(effSize) bytes")
                     detailRow(label: "Version", value: "\(version.versionNumber)")
                     
                     HStack {
@@ -639,6 +640,31 @@ public struct HistoricalInspectorView: View {
     }
     
     // MARK: - Helpers & Actions
+    
+    private func effectiveFileSize(for entry: FileHistoryEntry) -> Int64 {
+        let isAppOrPackage = entry.originalFilename.lowercased().hasSuffix(".app") ||
+                             entry.logicalPath.lowercased().hasSuffix(".app")
+        
+        if entry.fileSize > 0 && !isAppOrPackage {
+            return entry.fileSize
+        }
+        
+        var targetURL: URL? = syncEngine.resolveURL(for: entry.logicalPath)
+        if targetURL == nil && !entry.historyRelativePath.isEmpty {
+            let snapURL = syncEngine.storageManager.historyBaseURL.appendingPathComponent(entry.historyRelativePath)
+            if FileManager.default.fileExists(atPath: snapURL.path) {
+                targetURL = snapURL
+            }
+        }
+        
+        if let targetURL = targetURL {
+            let sz = HistoryWindowViewModel.calculateItemSize(at: targetURL)
+            if sz > 0 {
+                return sz
+            }
+        }
+        return entry.fileSize
+    }
     
     private func dotColor(for entry: FileHistoryEntry) -> Color {
         if entry.isCurrentVersion {
