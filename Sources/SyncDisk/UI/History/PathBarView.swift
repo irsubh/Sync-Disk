@@ -31,80 +31,48 @@ public struct PathBarView: View {
         self.onSelectFolder = onSelectFolder
     }
     
-    /// Resolves the source-side URL for the current context.
-    /// Priority: selected file version → selected file live path → navigated folder → source root.
-    /// Always shows where the content lives on disk, not in the backup store.
+    /// Resolves the destination-side URL on the external drive (e.g. SanDisk) for the current context.
+    /// Priority: selected file path -> navigated folder -> destination root.
+    /// Shows the true backup mirror location on the external disk.
     private var targetURL: URL? {
-        let sources = syncEngine.config.sources
+        guard let destBase = syncEngine.config.syncDestination else {
+            return nil
+        }
         
         // 1. A specific file is selected
         if let sel = selectedFilePath, !sel.isEmpty {
-            // Try to map logical path back to a live source URL
-            for source in sources {
-                if sel.hasPrefix(source.name + "/") {
-                    let sub = String(sel.dropFirst(source.name.count + 1))
-                    return source.url.appendingPathComponent(sub)
-                } else if sel == source.name {
-                    return source.url
-                }
-            }
-            // Fallback: use backup path if no source match
-            let backupBase = syncEngine.config.syncDestination
-                ?? syncEngine.storageManager.historyBaseURL.deletingLastPathComponent()
-            return backupBase.appendingPathComponent(sel)
+            return destBase.appendingPathComponent(sel)
         }
         
         // 2. A folder is being browsed
         if let folder = currentFolderPath, !folder.isEmpty {
-            for source in sources {
-                if folder.hasPrefix(source.name + "/") {
-                    let sub = String(folder.dropFirst(source.name.count + 1))
-                    return source.url.appendingPathComponent(sub)
-                } else if folder == source.name {
-                    return source.url
-                }
-            }
-            let backupBase = syncEngine.config.syncDestination
-                ?? syncEngine.storageManager.historyBaseURL.deletingLastPathComponent()
-            return backupBase.appendingPathComponent(folder)
+            return destBase.appendingPathComponent(folder)
         }
         
-        // 3. Nothing selected — show root of first available source
-        return sources.first?.url
+        // 3. Fallback: root destination
+        return destBase
     }
     
-    private static let rootVolumeName: String = {
-        (try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? "Macintosh HD"
-    }()
-    
-    /// Dynamically walks up the filesystem hierarchy from the source URL to the volume root.
-    /// For each component, backupRelativePath holds the logical path relative to the source root
-    /// so tapping a crumb navigates within the app correctly.
+    /// Dynamically walks up the filesystem hierarchy from the destination URL to the volume root.
     private var pathComponents: [PathComponentItem] {
-        guard let url = targetURL else { return [] }
+        guard let destBase = syncEngine.config.syncDestination?.standardizedFileURL,
+              let url = targetURL?.standardizedFileURL else { return [] }
         
-        // Determine which source root this URL falls under (for logical path computation)
-        let sources = syncEngine.config.sources
-        var sourceRoot: URL? = nil
-        var sourceName: String = ""
-        for source in sources {
-            let srcStd = source.url.standardizedFileURL.path
-            let urlStd = url.standardizedFileURL.path
-            if urlStd == srcStd || urlStd.hasPrefix(srcStd + "/") {
-                sourceRoot = source.url.standardizedFileURL
-                sourceName = source.name
-                break
-            }
+        var destStd = destBase.path
+        if destStd.hasSuffix("/") && destStd.count > 1 {
+            destStd.removeLast()
         }
+        let volumeName = (try? destBase.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? destBase.lastPathComponent
         
         var chain: [PathComponentItem] = []
-        var curr = url.standardizedFileURL
+        var curr = url
         
         while true {
-            let isVolume = (curr.path == "/" || curr.deletingLastPathComponent().path == "/Volumes")
+            let isDestRoot = (curr.path == destStd)
+            let isVolume = isDestRoot || curr.path == "/"
             let name: String
-            if curr.path == "/" {
-                name = Self.rootVolumeName
+            if isDestRoot {
+                name = volumeName
             } else if !curr.lastPathComponent.isEmpty {
                 name = curr.lastPathComponent
             } else {
@@ -112,17 +80,13 @@ public struct PathBarView: View {
             }
             let isDir = curr.pathExtension.isEmpty || curr.hasDirectoryPath
             
-            // Compute in-app logical path for navigation (relative to source, prefixed with source name)
+            // In-app logical path relative to destination root
             let relPath: String?
-            if let root = sourceRoot {
-                if curr.path == root.path {
-                    relPath = sourceName
-                } else if curr.path.hasPrefix(root.path + "/") {
-                    let sub = String(curr.path.dropFirst(root.path.count + 1))
-                    relPath = sub.isEmpty ? sourceName : "\(sourceName)/\(sub)"
-                } else {
-                    relPath = nil  // above source root - no in-app navigation
-                }
+            if isDestRoot {
+                relPath = nil
+            } else if curr.path.hasPrefix(destStd + "/") {
+                let sub = String(curr.path.dropFirst(destStd.count + 1))
+                relPath = sub
             } else {
                 relPath = nil
             }
@@ -135,7 +99,7 @@ public struct PathBarView: View {
                 backupRelativePath: relPath
             ))
             
-            if isVolume || curr.path == "/" {
+            if isDestRoot || curr.path == "/" || curr.path.count <= destStd.count {
                 break
             }
             let parent = curr.deletingLastPathComponent()

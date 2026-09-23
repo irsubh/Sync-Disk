@@ -44,36 +44,39 @@ public final class HistoryWindowViewModel: ObservableObject {
     
     public init() {}
     
-    /// Counts all individual files across all source folders on disk (not just synced history).
-    /// - totalCount:  all unique file paths (on disk + in history)
-    /// - activeCount: files that exist on disk right now
-    /// - deletedCount: files recorded in history but no longer on disk
-    public func reloadCounts(database: HistoryDatabase, sources: [SyncSource] = []) {
+    /// Counts all individual files across all source folders on destination disk (not just synced history).
+    /// - totalCount:  all unique file paths (on destination + in history)
+    /// - activeCount: files that exist on destination disk right now
+    /// - deletedCount: files recorded in history but no longer on destination disk
+    public func reloadCounts(database: HistoryDatabase, sources: [SyncSource] = [], destination: URL? = nil) {
         let fm = FileManager.default
         
-        // Count actual files on disk across all enabled sources
+        // Count actual files on destination disk across all enabled sources
         var liveFilePaths: Set<String> = []
-        for source in sources where source.isEnabled {
-            guard fm.fileExists(atPath: source.url.path) else { continue }
-            let enumerator = fm.enumerator(
-                at: source.url,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )
-            while let url = enumerator?.nextObject() as? URL {
-                let name = url.lastPathComponent
-                // Skip hidden/system/build files
-                guard !name.hasPrefix("."),
-                      !SyncEngine.ignoredFolderNames.contains(name),
-                      (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-                else { continue }
-                // Use relative logical path as key
-                let srcPath = source.url.standardizedFileURL.path
-                let urlPath = url.standardizedFileURL.path
-                if urlPath.hasPrefix(srcPath) {
-                    var rel = String(urlPath.dropFirst(srcPath.count))
-                    if rel.hasPrefix("/") { rel.removeFirst() }
-                    liveFilePaths.insert("\(source.name)/\(rel)")
+        if let destBase = destination {
+            for source in sources where source.isEnabled {
+                let destSourceURL = destBase.appendingPathComponent(source.name)
+                guard fm.fileExists(atPath: destSourceURL.path) else { continue }
+                let destSrcStd = destSourceURL.standardizedFileURL.path
+                let enumerator = fm.enumerator(
+                    at: destSourceURL,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                )
+                while let url = enumerator?.nextObject() as? URL {
+                    let name = url.lastPathComponent
+                    // Skip hidden/system/build files
+                    guard !name.hasPrefix("."),
+                          !SyncEngine.ignoredFolderNames.contains(name),
+                          (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                    else { continue }
+                    // Use relative logical path as key
+                    let urlPath = url.standardizedFileURL.path
+                    if urlPath.hasPrefix(destSrcStd) {
+                        var rel = String(urlPath.dropFirst(destSrcStd.count))
+                        if rel.hasPrefix("/") { rel.removeFirst() }
+                        liveFilePaths.insert("\(source.name)/\(rel)")
+                    }
                 }
             }
         }
@@ -83,17 +86,15 @@ public final class HistoryWindowViewModel: ObservableObject {
             let historyFiles = try database.allTrackedFiles(query: nil, filter: .all)
             let historyPaths = Set(historyFiles.map { $0.logicalPath })
             
-            // Active = on disk (use live count if sources available, else history active)
-            let active = sources.isEmpty
-                ? historyFiles.filter { !$0.isCurrentDeleted }.count
-                : liveFilePaths.count
+            // Active = on destination disk
+            let active = liveFilePaths.count
             
-            // Deleted = in history but NOT currently on disk
+            // Deleted = in history but NOT currently on destination disk
             let deleted = historyPaths.filter { path in
                 !liveFilePaths.contains(path)
             }.count
             
-            // Total = all unique file paths across both live + history
+            // Total = all unique file paths across both live destination + history
             let allPaths = liveFilePaths.union(historyPaths)
             
             self.totalCount = allPaths.count
@@ -160,96 +161,130 @@ public final class HistoryWindowViewModel: ObservableObject {
             var historyMap: [String: TrackedFileInfo] = [:]
             for h in historyFiles { historyMap[h.logicalPath] = h }
 
-            // 2. Enumerate real files and directories across all enabled sources
+            // 2. Enumerate destination disk (e.g. SanDisk) across all enabled sources
             var allLivePathsSet: Set<String> = []
             var allDirectoriesSet: Set<String> = []
             var liveFilesForView: [TrackedFileInfo] = []
 
             let showDeletedOnly = (sidebarSel == .deletedOnly)
+            let destBase = syncEngine.config.syncDestination
+            let isDestConnected = syncEngine.diskMonitor.isConnected
 
-            for source in sources where source.isEnabled {
-                guard fm.fileExists(atPath: source.url.path) else { continue }
-                let srcStd = source.url.standardizedFileURL.path
-                
-                // Track source root folder
-                allDirectoriesSet.insert(source.name)
-                
-                let enumerator = fm.enumerator(
-                    at: source.url,
-                    includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
-                    options: [.skipsHiddenFiles]
-                )
-                
-                while let url = enumerator?.nextObject() as? URL {
-                    let name = url.lastPathComponent
-                    guard !name.hasPrefix("."),
-                          !SyncEngine.ignoredFolderNames.contains(name) else {
+            if let dest = destBase, isDestConnected {
+                for source in sources where source.isEnabled {
+                    // Record source category folder so it appears in the grid/tree
+                    allDirectoriesSet.insert(source.name)
+                    
+                    let destSourceURL = dest.appendingPathComponent(source.name)
+                    guard fm.fileExists(atPath: destSourceURL.path) else { continue }
+                    let destSrcStd = destSourceURL.standardizedFileURL.path
+                    
+                    let enumerator = fm.enumerator(
+                        at: destSourceURL,
+                        includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
+                        options: [.skipsHiddenFiles]
+                    )
+                    
+                    while let url = enumerator?.nextObject() as? URL {
+                        let name = url.lastPathComponent
+                        guard !name.hasPrefix("."),
+                              !SyncEngine.ignoredFolderNames.contains(name) else {
+                            var isDir: ObjCBool = false
+                            if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                                enumerator?.skipDescendants()
+                            }
+                            continue
+                        }
+                        
+                        let urlStd = url.standardizedFileURL.path
+                        guard urlStd.hasPrefix(destSrcStd) else { continue }
+                        var rel = String(urlStd.dropFirst(destSrcStd.count))
+                        if rel.hasPrefix("/") { rel.removeFirst() }
+                        guard !rel.isEmpty else { continue }
+                        
+                        let logicalPath = "\(source.name)/\(rel)"
+                        
                         var isDir: ObjCBool = false
                         if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-                            enumerator?.skipDescendants()
+                            allDirectoriesSet.insert(logicalPath)
+                            continue
                         }
-                        continue
+                        
+                        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+                        
+                        allLivePathsSet.insert(logicalPath)
+                        
+                        // Filter for current view
+                        let matchesSourceFilter: Bool
+                        switch sidebarSel {
+                        case .source(let sid):
+                            matchesSourceFilter = (source.id == sid)
+                        default:
+                            matchesSourceFilter = true
+                        }
+                        
+                        guard matchesSourceFilter && !showDeletedOnly else { continue }
+                        
+                        if !searchQ.isEmpty {
+                            guard name.localizedCaseInsensitiveContains(searchQ) ||
+                                  logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
+                        }
+                        
+                        let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                        let fileSize = Int64(attrs?.fileSize ?? 0)
+                        let modDate = attrs?.contentModificationDate ?? Date()
+                        
+                        if let hist = historyMap[logicalPath] {
+                            liveFilesForView.append(TrackedFileInfo(
+                                logicalPath: logicalPath,
+                                originalFilename: name,
+                                lastChangeType: hist.lastChangeType,
+                                lastTimestamp: modDate,
+                                fileSize: fileSize > 0 ? fileSize : hist.fileSize,
+                                versionCount: hist.versionCount,
+                                isDeleted: false
+                            ))
+                        } else {
+                            liveFilesForView.append(TrackedFileInfo(
+                                logicalPath: logicalPath,
+                                originalFilename: name,
+                                lastChangeType: .created,
+                                lastTimestamp: modDate,
+                                fileSize: fileSize,
+                                versionCount: 0,
+                                isDeleted: false
+                            ))
+                        }
+                    }
+                }
+            } else {
+                // Destination is disconnected or not set: populate from database history only
+                for hist in historyFiles where !hist.isDeleted {
+                    allLivePathsSet.insert(hist.logicalPath)
+                    
+                    let parts = hist.logicalPath.split(separator: "/")
+                    if parts.count > 1 {
+                        var dirAccum = ""
+                        for part in parts.dropLast() {
+                            dirAccum = dirAccum.isEmpty ? String(part) : "\(dirAccum)/\(part)"
+                            allDirectoriesSet.insert(dirAccum)
+                        }
                     }
                     
-                    let urlStd = url.standardizedFileURL.path
-                    guard urlStd.hasPrefix(srcStd) else { continue }
-                    var rel = String(urlStd.dropFirst(srcStd.count))
-                    if rel.hasPrefix("/") { rel.removeFirst() }
-                    guard !rel.isEmpty else { continue }
-                    
-                    let logicalPath = "\(source.name)/\(rel)"
-                    
-                    var isDir: ObjCBool = false
-                    if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-                        allDirectoriesSet.insert(logicalPath)
-                        continue
-                    }
-                    
-                    guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
-                    
-                    allLivePathsSet.insert(logicalPath)
-                    
-                    // Filter for current view
                     let matchesSourceFilter: Bool
                     switch sidebarSel {
                     case .source(let sid):
-                        matchesSourceFilter = (source.id == sid)
+                        matchesSourceFilter = sources.first(where: { $0.id == sid }).map { hist.logicalPath.hasPrefix($0.name + "/") } ?? true
                     default:
                         matchesSourceFilter = true
                     }
                     
                     guard matchesSourceFilter && !showDeletedOnly else { continue }
-                    
                     if !searchQ.isEmpty {
-                        guard name.localizedCaseInsensitiveContains(searchQ) ||
-                              logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
+                        guard hist.originalFilename.localizedCaseInsensitiveContains(searchQ) ||
+                              hist.logicalPath.localizedCaseInsensitiveContains(searchQ) else { continue }
                     }
-                    
-                    let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                    let fileSize = Int64(attrs?.fileSize ?? 0)
-                    let modDate = attrs?.contentModificationDate ?? Date()
-                    
-                    if let hist = historyMap[logicalPath] {
-                        liveFilesForView.append(TrackedFileInfo(
-                            logicalPath: logicalPath,
-                            originalFilename: name,
-                            lastChangeType: hist.lastChangeType,
-                            lastTimestamp: modDate,
-                            fileSize: fileSize > 0 ? fileSize : hist.fileSize,
-                            versionCount: hist.versionCount,
-                            isDeleted: false
-                        ))
-                    } else {
-                        liveFilesForView.append(TrackedFileInfo(
-                            logicalPath: logicalPath,
-                            originalFilename: name,
-                            lastChangeType: .created,
-                            lastTimestamp: modDate,
-                            fileSize: fileSize,
-                            versionCount: 0,
-                            isDeleted: false
-                        ))
-                    }
+                    liveFilesForView.append(hist)
                 }
             }
 
@@ -593,7 +628,16 @@ public final class HistoryWindowViewModel: ObservableObject {
     }
     
     public func openFile(_ file: TrackedFileInfo, syncEngine: SyncEngine) {
-        // Try live source first
+        // 1. Try destination mirror file on external disk first (SanDisk)
+        if let destBase = syncEngine.config.syncDestination {
+            let destFileURL = destBase.appendingPathComponent(file.logicalPath)
+            if FileManager.default.fileExists(atPath: destFileURL.path) {
+                NSWorkspace.shared.open(destFileURL)
+                return
+            }
+        }
+        
+        // 2. Try live local source fallback
         for source in syncEngine.config.sources {
             if file.logicalPath.hasPrefix(source.name + "/") {
                 let sub = String(file.logicalPath.dropFirst(source.name.count + 1))

@@ -807,6 +807,13 @@ public struct HistoricalInspectorView: View {
     }
     
     private func revealFolderInFinder(_ folderPath: String) {
+        if let dest = syncEngine.config.syncDestination {
+            let destFolder = dest.appendingPathComponent(folderPath)
+            if FileManager.default.fileExists(atPath: destFolder.path) {
+                NSWorkspace.shared.activateFileViewerSelecting([destFolder])
+                return
+            }
+        }
         for source in syncEngine.config.sources {
             if folderPath.hasPrefix(source.name + "/") {
                 let sub = String(folderPath.dropFirst(source.name.count + 1))

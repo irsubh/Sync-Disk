@@ -972,11 +972,19 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
     
     /// Resolves a logical path (e.g. "Documents/nodezed/social/avatar/main.png") to an actual on-disk URL.
-    /// Checks live source folders first, then sync mirror destination, then history store.
+    /// Checks sync mirror destination on external drive first, then live source folders, then history store.
     public func resolveURL(for logicalPath: String) -> URL? {
         let fm = FileManager.default
         
-        // 1. Check live source directories
+        // 1. Check mirror destination (e.g. /Volumes/SanDisk/Documents/...)
+        if let dest = config.syncDestination {
+            let u = dest.appendingPathComponent(logicalPath)
+            if fm.fileExists(atPath: u.path) {
+                return u
+            }
+        }
+        
+        // 2. Check live source directories
         for source in config.sources where source.isEnabled {
             let prefix = source.name + "/"
             if logicalPath.hasPrefix(prefix) {
@@ -989,14 +997,6 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 if fm.fileExists(atPath: source.url.path) {
                     return source.url
                 }
-            }
-        }
-        
-        // 2. Check mirror destination (e.g. /Volumes/SanDisk/Documents/...)
-        if let dest = config.syncDestination {
-            let u = dest.appendingPathComponent(logicalPath)
-            if fm.fileExists(atPath: u.path) {
-                return u
             }
         }
         
