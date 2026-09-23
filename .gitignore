@@ -20,6 +20,7 @@ build/
 DerivedData/
 *.xcodeproj
 *.xcworkspace
+_CodeSignature/
 
 # User & Local Environment
 *.swp
