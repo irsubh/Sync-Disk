@@ -575,6 +575,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     self.historyRevision += 1
                     self.engineState = .idle
                     self.syncProgress.isSyncing = false
+                    self.syncProgress.currentFileName = ""
                     self.syncProgress.statusDescription = "Idle — Everything up to date"
                 }
             } else {
@@ -585,6 +586,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     }
                     self.engineState = .idle
                     self.syncProgress.isSyncing = false
+                    self.syncProgress.currentFileName = ""
                 }
             }
             
@@ -1526,6 +1528,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             await MainActor.run {
                 self.engineState = .scanning
                 self.syncProgress.isSyncing = true
+                self.syncProgress.currentFileName = ""
                 self.syncProgress.statusDescription = "Scanning and indexing files..."
                 self.lastErrorMessage = nil
             }
@@ -1538,6 +1541,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 self.syncProgress.isSyncing = skipped > 0
                 self.syncProgress.filesPending = skipped
                 if skipped > 0 {
+                    self.syncProgress.currentFileName = "iCloud Downloads"
                     self.syncProgress.statusDescription = "Downloading \(skipped) file\(skipped == 1 ? "" : "s") from iCloud..."
                 } else {
                     self.syncProgress.statusDescription = self.isLiveSyncPaused ? "Live Sync Paused" : "Idle — Everything up to date"
@@ -1550,9 +1554,9 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             }
             self.refreshDiskStatus(force: false)
             
-            // If iCloud files are still downloading, fast-retry after 5s without dropping out to idle
+            // If iCloud files are still downloading, retry after 30s in background without spamming CPU
             if skipped > 0, !self.isLiveSyncPaused, self.diskMonitor.isConnected {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
                 guard !self.isReconciling, !self.isLiveSyncPaused, self.diskMonitor.isConnected else { return }
                 await MainActor.run { self.triggerReconcile() }
             }
@@ -1568,6 +1572,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             
             var readyItems: [PendingSyncItem] = []
             var iCloudPendingItems: [PendingSyncItem] = []
+            var alreadySyncedCount = 0
             
             let enumerator = fileManager.enumerator(
                 at: source.url,
@@ -1629,6 +1634,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                                 historyRelativePath: "\(src.name)/\(relPath)"
                             )
                         }
+                        alreadySyncedCount += 1
                         continue
                     }
                     
@@ -1653,6 +1659,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                                 historyRelativePath: "\(src.name)/\(relPath)"
                             )
                         }
+                        alreadySyncedCount += 1
                         continue
                     }
                 }
@@ -1730,17 +1737,24 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 }
             }
             
-            let totalCount = readyItems.count + iCloudPendingItems.count
-            guard totalCount > 0 else { continue }
+            let pendingCount = readyItems.count + iCloudPendingItems.count
+            let totalSourceCount = alreadySyncedCount + pendingCount
+            guard pendingCount > 0 else { continue }
             
-            var completedCount = 0
+            var completedCount = alreadySyncedCount
             var lastReportDate = Date.distantPast
             let maxConcurrent = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
             
             await MainActor.run {
-                self.syncProgress.filesPending = totalCount
-                self.syncProgress.filesCompleted = 0
-                self.syncProgress.statusDescription = "Syncing \(source.name) (\(totalCount) files)..."
+                self.syncProgress.filesCompleted = completedCount
+                self.syncProgress.filesPending = pendingCount
+                if !readyItems.isEmpty {
+                    self.syncProgress.currentFileName = "Syncing \(source.name)"
+                    self.syncProgress.statusDescription = "Syncing \(source.name) (\(completedCount)/\(totalSourceCount))..."
+                } else {
+                    self.syncProgress.currentFileName = "iCloud Downloads"
+                    self.syncProgress.statusDescription = "Downloading \(pendingCount) files from iCloud..."
+                }
             }
             
             // Phase 1: Sync all ready local files with maximum concurrency!
@@ -1772,15 +1786,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                         
                         completedCount += 1
                         let now = Date()
-                        if now.timeIntervalSince(lastReportDate) >= 0.25 || completedCount == totalCount {
+                        if now.timeIntervalSince(lastReportDate) >= 0.25 || completedCount == totalSourceCount {
                             lastReportDate = now
                             let done = completedCount
                             let currentName = item.sourceURL.lastPathComponent
                             await MainActor.run {
                                 self.syncProgress.filesCompleted = done
-                                self.syncProgress.filesPending = max(0, totalCount - done)
+                                self.syncProgress.filesPending = max(0, totalSourceCount - done)
                                 self.syncProgress.currentFileName = currentName
-                                self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalCount))..."
+                                self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalSourceCount))..."
                             }
                         }
                     }
@@ -1791,8 +1805,13 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             // Phase 2: Process iCloud files as they arrive
             if !iCloudPendingItems.isEmpty {
                 var remainingICloud = iCloudPendingItems
-                let maxWaitRounds = 30 // Poll for up to ~30-45s actively
+                let maxWaitRounds = 15 // Check actively for up to 15s
                 var round = 0
+                
+                await MainActor.run {
+                    self.syncProgress.currentFileName = "iCloud Downloads"
+                    self.syncProgress.statusDescription = "Downloading \(remainingICloud.count) files from iCloud..."
+                }
                 
                 while !remainingICloud.isEmpty && round < maxWaitRounds {
                     guard !self.isQueuePaused, !self.isLiveSyncPaused else { break }
@@ -1834,15 +1853,15 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                                 
                                 completedCount += 1
                                 let now = Date()
-                                if now.timeIntervalSince(lastReportDate) >= 0.25 || completedCount == totalCount {
+                                if now.timeIntervalSince(lastReportDate) >= 0.25 || completedCount == totalSourceCount {
                                     lastReportDate = now
                                     let done = completedCount
                                     let currentName = item.sourceURL.lastPathComponent
                                     await MainActor.run {
                                         self.syncProgress.filesCompleted = done
-                                        self.syncProgress.filesPending = max(0, totalCount - done)
+                                        self.syncProgress.filesPending = max(0, totalSourceCount - done)
                                         self.syncProgress.currentFileName = currentName
-                                        self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalCount))..."
+                                        self.syncProgress.statusDescription = "Syncing \(source.name) (\(done)/\(totalSourceCount))..."
                                     }
                                 }
                             }
@@ -1857,11 +1876,12 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     
                     let remCount = remainingICloud.count
                     await MainActor.run {
+                        self.syncProgress.currentFileName = "iCloud Downloads"
                         self.syncProgress.statusDescription = "Downloading \(remCount) files from iCloud..."
                     }
                     
                     // Re-trigger downloads in case macOS paused any
-                    if round % 5 == 0 {
+                    if round % 4 == 0 {
                         for item in remainingICloud {
                             self.iCloudManager.triggerDownload(at: item.sourceURL)
                         }

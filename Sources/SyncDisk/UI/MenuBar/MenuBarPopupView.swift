@@ -237,6 +237,9 @@ public struct MenuBarPopupView: View {
         } else if syncEngine.isLiveSyncPaused {
             return "Live syncing paused"
         } else if syncEngine.syncProgress.isSyncing {
+            if syncEngine.syncProgress.statusDescription.contains("iCloud") {
+                return syncEngine.syncProgress.statusDescription
+            }
             return "Syncing (\(syncEngine.syncProgress.filesPending) files left)"
         } else if let err = syncEngine.lastErrorMessage {
             return err

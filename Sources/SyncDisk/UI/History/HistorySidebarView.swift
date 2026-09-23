@@ -328,7 +328,18 @@ public struct HistorySidebarView: View {
                     .scaleEffect(0.65)
                     .frame(width: 14, height: 14)
                 
-                Text(syncEngine.syncProgress.currentFileName.isEmpty ? "Live Syncing" : syncEngine.syncProgress.currentFileName)
+                let titleText: String = {
+                    let name = syncEngine.syncProgress.currentFileName
+                    if !name.isEmpty {
+                        return name
+                    }
+                    if syncEngine.syncProgress.statusDescription.contains("iCloud") {
+                        return "iCloud Downloads"
+                    }
+                    return "Live Syncing"
+                }()
+                
+                Text(titleText)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.primary)
                     .lineLimit(1)
