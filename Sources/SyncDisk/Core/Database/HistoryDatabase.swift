@@ -653,6 +653,18 @@ public final class HistoryDatabase: @unchecked Sendable {
     
     public func versionCount(forFolder path: String) -> Int {
         return queue.sync {
+            let cleanPrefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !cleanPrefix.isEmpty else { return 1 }
+            let prefix = cleanPrefix + "/"
+            
+            // Fast check: if no snapshots and no archived/deleted entries for this path, count is 1
+            let hasAnyHist = versionsByPath.contains { (logicalPath, vers) in
+                guard logicalPath.hasPrefix(prefix) || logicalPath == cleanPrefix else { return false }
+                return vers.contains { !$0.isCurrentVersion || !$0.historyRelativePath.isEmpty || $0.changeType == .deleted }
+            }
+            if !hasAnyHist && snapshotsByDate.isEmpty {
+                return 1
+            }
             let hist = folderHistoryLocked(for: path)
             return max(1, hist.count)
         }
@@ -670,12 +682,12 @@ public final class HistoryDatabase: @unchecked Sendable {
         let prefix = cleanPrefix + "/"
         let folderName = cleanPrefix.split(separator: "/").last.map(String.init) ?? cleanPrefix
         
-        var folderEntries: [FileHistoryEntry] = []
-        for (logicalPath, vers) in versionsByPath where logicalPath.hasPrefix(prefix) {
-            folderEntries.append(contentsOf: vers)
+        var folderEntriesByPath: [String: [FileHistoryEntry]] = [:]
+        for (logicalPath, vers) in versionsByPath where logicalPath.hasPrefix(prefix) || logicalPath == cleanPrefix {
+            folderEntriesByPath[logicalPath] = vers
         }
         
-        guard !folderEntries.isEmpty else {
+        guard !folderEntriesByPath.isEmpty else {
             return [
                 FolderHistoryVersion(
                     path: cleanPrefix,
@@ -689,43 +701,111 @@ public final class HistoryDatabase: @unchecked Sendable {
             ]
         }
         
-        let sortedEntries = folderEntries.sorted(by: { $0.timestamp < $1.timestamp })
-        var distinctDates: [Date] = []
-        for entry in sortedEntries {
-            if let last = distinctDates.last {
-                if abs(entry.timestamp.timeIntervalSince(last)) > 2.0 {
-                    distinctDates.append(entry.timestamp)
+        // Calculate current live state
+        var currentActiveCount = 0
+        for (_, vers) in folderEntriesByPath {
+            if let latest = vers.sorted(by: { $0.timestamp > $1.timestamp }).first {
+                if latest.changeType != .deleted {
+                    currentActiveCount += 1
                 }
-            } else {
-                distinctDates.append(entry.timestamp)
+            }
+        }
+        let currentTimestamp = folderEntriesByPath.values.flatMap { $0 }.map(\.timestamp).max() ?? Date()
+        
+        // Collect real historical dates: ONLY from physical snapshots or actual archived/deleted versions
+        var allHistDates: [Date] = []
+        for (snapDate, snapEntries) in snapshotsByDate {
+            if snapEntries.contains(where: { $0.logicalPath.hasPrefix(prefix) || $0.logicalPath == cleanPrefix }) {
+                allHistDates.append(snapDate)
             }
         }
         
+        let sortedHistEntries = folderEntriesByPath.values.flatMap { $0 }
+            .filter { !$0.isCurrentVersion || !$0.historyRelativePath.isEmpty || $0.changeType == .deleted }
+            .sorted(by: { $0.timestamp < $1.timestamp })
+        
+        for entry in sortedHistEntries {
+            if !allHistDates.contains(where: { abs($0.timeIntervalSince(entry.timestamp)) <= 5.0 }) {
+                allHistDates.append(entry.timestamp)
+            }
+        }
+        allHistDates.sort()
+        
+        // Cluster dates within 5 seconds into single historical versions
+        var distinctHistDates: [Date] = []
+        for d in allHistDates {
+            if let last = distinctHistDates.last {
+                if abs(d.timeIntervalSince(last)) > 5.0 {
+                    distinctHistDates.append(d)
+                }
+            } else {
+                distinctHistDates.append(d)
+            }
+        }
+        
+        // If there are no historical archives or snapshots, the folder has only 1 version (Current)
+        if distinctHistDates.isEmpty {
+            return [
+                FolderHistoryVersion(
+                    path: cleanPrefix,
+                    name: folderName,
+                    timestamp: currentTimestamp,
+                    changeType: currentActiveCount == 0 ? .deleted : .created,
+                    itemCount: currentActiveCount,
+                    versionNumber: 1,
+                    isCurrentVersion: true
+                )
+            ]
+        }
+        
+        // Check if the current timestamp is essentially the latest historical date
+        let latestHistDate = distinctHistDates.last
+        let currentIsSeparateVersion: Bool = {
+            guard let lastD = latestHistDate else { return true }
+            return abs(currentTimestamp.timeIntervalSince(lastD)) > 5.0
+        }()
+        
         var result: [FolderHistoryVersion] = []
-        for (idx, date) in distinctDates.enumerated() {
+        for (idx, date) in distinctHistDates.enumerated() {
             let verNum = idx + 1
-            var activeCount = 0
-            var allDeleted = true
-            for (logicalPath, vers) in versionsByPath where logicalPath.hasPrefix(prefix) {
+            var activeCountAtDate = 0
+            var allDeletedAtDate = true
+            
+            for (_, vers) in folderEntriesByPath {
                 if let latestAtDate = vers.filter({ $0.timestamp <= date }).sorted(by: { $0.timestamp > $1.timestamp }).first {
                     if latestAtDate.changeType != .deleted {
-                        activeCount += 1
-                        allDeleted = false
+                        activeCountAtDate += 1
+                        allDeletedAtDate = false
                     }
                 }
             }
             
-            let changeType: ChangeType = allDeleted ? .deleted : (idx == 0 ? .created : .modified)
-            let isCurrent = (idx == distinctDates.count - 1)
+            let isLastHist = (idx == distinctHistDates.count - 1)
+            let isCurrent = isLastHist && !currentIsSeparateVersion
+            let changeType: ChangeType = allDeletedAtDate ? .deleted : (idx == 0 ? .created : .modified)
             
             result.append(FolderHistoryVersion(
                 path: cleanPrefix,
                 name: folderName,
                 timestamp: date,
                 changeType: changeType,
-                itemCount: activeCount,
+                itemCount: activeCountAtDate,
                 versionNumber: verNum,
                 isCurrentVersion: isCurrent
+            ))
+        }
+        
+        if currentIsSeparateVersion {
+            let curVerNum = distinctHistDates.count + 1
+            let curChange: ChangeType = currentActiveCount == 0 ? .deleted : .modified
+            result.append(FolderHistoryVersion(
+                path: cleanPrefix,
+                name: folderName,
+                timestamp: currentTimestamp,
+                changeType: curChange,
+                itemCount: currentActiveCount,
+                versionNumber: curVerNum,
+                isCurrentVersion: true
             ))
         }
         

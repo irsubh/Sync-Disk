@@ -44,6 +44,60 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     private var recentlyHandledPaths: [String: (date: Date, size: Int64, mtime: Date)] = [:]
     private let handledPathsLock = NSLock()
     
+    private var liveSyncBytesDelta: Int64 = 0
+    private var liveSyncFilesDelta: Int = 0
+    private var lastLiveDiskStatusUpdate: Date = Date.distantPast
+    private let liveMetricsLock = NSLock()
+    
+    public func recordLiveSyncProgress(bytes: Int64, isNewFile: Bool) {
+        liveMetricsLock.lock()
+        liveSyncBytesDelta += bytes
+        if isNewFile {
+            liveSyncFilesDelta += 1
+        }
+        let now = Date()
+        let shouldFlush = now.timeIntervalSince(lastLiveDiskStatusUpdate) >= 0.35
+        var flushedBytes: Int64 = 0
+        var flushedFiles: Int = 0
+        if shouldFlush {
+            flushedBytes = liveSyncBytesDelta
+            flushedFiles = liveSyncFilesDelta
+            liveSyncBytesDelta = 0
+            liveSyncFilesDelta = 0
+            lastLiveDiskStatusUpdate = now
+        }
+        liveMetricsLock.unlock()
+        
+        if flushedBytes > 0 || flushedFiles > 0 {
+            Task { @MainActor in
+                self.diskStatus.syncedSizeBytes += flushedBytes
+                self.diskStatus.totalFilesCount += flushedFiles
+                if self.diskStatus.totalSpaceBytes > 0 {
+                    self.diskStatus.freeSpaceBytes = max(0, self.diskStatus.freeSpaceBytes - flushedBytes)
+                }
+            }
+        }
+    }
+    
+    public func flushLiveSyncProgress() {
+        liveMetricsLock.lock()
+        let flushedBytes = liveSyncBytesDelta
+        let flushedFiles = liveSyncFilesDelta
+        liveSyncBytesDelta = 0
+        liveSyncFilesDelta = 0
+        liveMetricsLock.unlock()
+        
+        if flushedBytes > 0 || flushedFiles > 0 {
+            Task { @MainActor in
+                self.diskStatus.syncedSizeBytes += flushedBytes
+                self.diskStatus.totalFilesCount += flushedFiles
+                if self.diskStatus.totalSpaceBytes > 0 {
+                    self.diskStatus.freeSpaceBytes = max(0, self.diskStatus.freeSpaceBytes - flushedBytes)
+                }
+            }
+        }
+    }
+    
     public func markPathHandled(logicalPath: String, size: Int64, mtime: Date) {
         handledPathsLock.lock()
         recentlyHandledPaths[logicalPath] = (date: Date(), size: size, mtime: mtime)
@@ -476,6 +530,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     }
                     await group.waitForAll()
                 }
+                self.flushLiveSyncProgress()
                 self.database.flushIndex()
                 
                 await MainActor.run {
@@ -649,6 +704,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         self.markPathHandled(logicalPath: logicalPath, size: mirrorSize, mtime: now)
         self.storageMetrics.updateCachedSizes(syncedDelta: mirrorSize, historyDelta: archivedHistorySize)
+        self.recordLiveSyncProgress(bytes: mirrorSize, isNewFile: !destExists)
         
         // 7. Safe iCloud Eviction: ONLY after external backup is verified!
         if config.evictICloudAfterSync && (iCloudState == .downloaded || iCloudManager.isUbiquitousItem(at: sourceURL)) {
@@ -1254,7 +1310,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     
                     completedCount += 1
                     let now = Date()
-                    if now.timeIntervalSince(lastReportDate) >= 0.75 || completedCount == totalCount {
+                    if now.timeIntervalSince(lastReportDate) >= 0.35 || completedCount == totalCount {
                         lastReportDate = now
                         let done = completedCount
                         await MainActor.run {
@@ -1263,6 +1319,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                     }
                 }
                 await group.waitForAll()
+                self.flushLiveSyncProgress()
             }
             
             self.database.flushIndex()

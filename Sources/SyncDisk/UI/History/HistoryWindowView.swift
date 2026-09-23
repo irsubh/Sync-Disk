@@ -307,8 +307,8 @@ public final class HistoryWindowViewModel: ObservableObject {
                         var fileSize = Int64(attrs?.totalFileSize ?? attrs?.fileSize ?? 0)
                         let modDate = attrs?.contentModificationDate ?? Date()
                         
-                        if isAppBundle || (fileSize == 0 && isDir.boolValue) {
-                            fileSize = Self.calculateItemSize(at: url)
+                        if fileSize == 0, let hist = historyMap[logicalPath], hist.fileSize > 0 {
+                            fileSize = hist.fileSize
                         }
                         
                         if let hist = historyMap[logicalPath] {
@@ -594,7 +594,7 @@ public final class HistoryWindowViewModel: ObservableObject {
         selectedVersion = nil
         fileVersions = []
         if let engine = syncEngine {
-            refreshFileList(syncEngine: engine)
+            recomputeDisplayedItems(syncEngine: engine)
         }
     }
     
@@ -741,28 +741,14 @@ public final class HistoryWindowViewModel: ObservableObject {
         // Step 1: Collect immediate folder names and immediate files directly in basePrefix
         var immediateFolderNames = Set<String>()
         var immediateFiles: [TrackedFileInfo] = []
+        var appBundlesAdded = Set<String>()
         
-        if currentFilter == .history {
-            // In History mode: only gather immediate folder names that contain deleted files
-            for file in trackedFiles {
-                let rel: Substring
-                if basePrefix.isEmpty {
-                    rel = file.logicalPath[...]
-                } else if file.logicalPath.hasPrefix(basePrefix + "/") {
-                    rel = file.logicalPath.dropFirst(basePrefix.count + 1)
-                } else {
-                    continue
-                }
-                let parts = rel.split(separator: "/")
-                if parts.count > 1 {
-                    let firstPart = String(parts[0])
-                    if firstPart != basePrefix && !firstPart.isEmpty && !firstPart.lowercased().hasSuffix(".app") {
-                        immediateFolderNames.insert(firstPart)
-                    }
-                }
-            }
-        } else {
-            // Discovered directories from disk
+        var folderSubfolders: [String: Set<String>] = [:]
+        var folderDirectCount: [String: Int] = [:]
+        var folderLatestDate: [String: Date] = [:]
+        var folderHasActiveFiles: [String: Bool] = [:]
+
+        if currentFilter != .history {
             for dirPath in knownDirectoryPaths {
                 let rel: String
                 if basePrefix.isEmpty {
@@ -773,19 +759,22 @@ public final class HistoryWindowViewModel: ObservableObject {
                     continue
                 }
                 let parts = rel.split(separator: "/")
-                if parts.count >= 1 {
-                    let firstPart = String(parts[0])
-                    if firstPart.lowercased().hasSuffix(".app") || firstPart == basePrefix || firstPart.isEmpty {
-                        continue
+                guard let firstPartSub = parts.first else { continue }
+                let firstPart = String(firstPartSub)
+                if firstPart.lowercased().hasSuffix(".app") || firstPart == basePrefix || firstPart.isEmpty {
+                    continue
+                }
+                immediateFolderNames.insert(firstPart)
+                if parts.count > 1 {
+                    let secondPart = String(parts[1])
+                    if !secondPart.lowercased().hasSuffix(".app") && !secondPart.isEmpty {
+                        folderSubfolders[firstPart, default: []].insert(secondPart)
                     }
-                    immediateFolderNames.insert(firstPart)
                 }
             }
         }
-        
-        // Tracked files under basePrefix
-        var appBundlesAdded = Set<String>()
-        
+
+        // Single linear pass over trackedFiles
         for file in trackedFiles {
             let rel: Substring
             if basePrefix.isEmpty {
@@ -793,143 +782,92 @@ public final class HistoryWindowViewModel: ObservableObject {
             } else if file.logicalPath.hasPrefix(basePrefix + "/") {
                 rel = file.logicalPath.dropFirst(basePrefix.count + 1)
             } else {
-                // Never add basePrefix as an item inside itself!
                 continue
             }
             
             let parts = rel.split(separator: "/")
-            if parts.count > 1 {
-                let firstPart = String(parts[0])
+            guard let firstPartSub = parts.first else { continue }
+            let firstPart = String(firstPartSub)
+            guard firstPart != basePrefix && !firstPart.isEmpty else { continue }
+            
+            if parts.count == 1 {
                 if firstPart.lowercased().hasSuffix(".app") {
-                    // It's an application bundle! Collapse all files inside it into a single application file item
+                    if !appBundlesAdded.contains(firstPart) {
+                        appBundlesAdded.insert(firstPart)
+                        immediateFiles.append(file)
+                    }
+                } else {
+                    immediateFiles.append(file)
+                }
+            } else {
+                if firstPart.lowercased().hasSuffix(".app") {
                     if !appBundlesAdded.contains(firstPart) {
                         appBundlesAdded.insert(firstPart)
                         let appLogicalPath = basePrefix.isEmpty ? firstPart : "\(basePrefix)/\(firstPart)"
-                        var appSize: Int64 = 0
-                        if let appURL = syncEngine.resolveURL(for: appLogicalPath) {
-                            appSize = HistoryWindowViewModel.calculateItemSize(at: appURL)
-                        }
-                        if appSize == 0 {
-                            let subSum = trackedFiles.filter { $0.logicalPath.hasPrefix(appLogicalPath + "/") }.reduce(0) { $0 + $1.fileSize }
-                            appSize = subSum > 0 ? subSum : file.fileSize
-                        }
                         let appItem = TrackedFileInfo(
                             logicalPath: appLogicalPath,
                             originalFilename: firstPart,
                             lastChangeType: file.lastChangeType,
                             lastTimestamp: file.lastTimestamp,
-                            fileSize: appSize,
+                            fileSize: file.fileSize,
                             versionCount: file.versionCount,
                             isDeleted: file.isDeleted
                         )
                         immediateFiles.append(appItem)
                     }
-                    continue
-                }
-                if firstPart != basePrefix && !firstPart.isEmpty {
-                    immediateFolderNames.insert(firstPart)
-                }
-            } else if parts.count == 1 {
-                let firstPart = String(parts[0])
-                if firstPart.lowercased().hasSuffix(".app") {
-                    if appBundlesAdded.contains(firstPart) {
-                        continue
-                    }
-                    appBundlesAdded.insert(firstPart)
-                    var appSize = file.fileSize
-                    if appSize == 0 || appSize < 1024 {
-                        if let appURL = syncEngine.resolveURL(for: file.logicalPath) {
-                            let diskSize = HistoryWindowViewModel.calculateItemSize(at: appURL)
-                            if diskSize > 0 { appSize = diskSize }
+                } else {
+                    if currentFilter == .history {
+                        if file.isDeleted {
+                            immediateFolderNames.insert(firstPart)
                         }
-                        if appSize == 0 {
-                            let subSum = trackedFiles.filter { $0.logicalPath.hasPrefix(file.logicalPath + "/") }.reduce(0) { $0 + $1.fileSize }
-                            if subSum > 0 { appSize = subSum }
+                    } else {
+                        immediateFolderNames.insert(firstPart)
+                    }
+                    
+                    if parts.count == 2 {
+                        let subItem = String(parts[1])
+                        if subItem.lowercased().hasSuffix(".app") {
+                            folderSubfolders[firstPart, default: []].insert(subItem)
+                        } else {
+                            folderDirectCount[firstPart, default: 0] += 1
+                        }
+                    } else if parts.count > 2 {
+                        let subItem = String(parts[1])
+                        if !subItem.lowercased().hasSuffix(".app") {
+                            folderSubfolders[firstPart, default: []].insert(subItem)
                         }
                     }
-                    let appItem = TrackedFileInfo(
-                        logicalPath: file.logicalPath,
-                        originalFilename: file.originalFilename,
-                        lastChangeType: file.lastChangeType,
-                        lastTimestamp: file.lastTimestamp,
-                        fileSize: appSize,
-                        versionCount: file.versionCount,
-                        isDeleted: file.isDeleted
-                    )
-                    immediateFiles.append(appItem)
-                    continue
+                    
+                    if let curLatest = folderLatestDate[firstPart] {
+                        if file.lastTimestamp > curLatest {
+                            folderLatestDate[firstPart] = file.lastTimestamp
+                        }
+                    } else {
+                        folderLatestDate[firstPart] = file.lastTimestamp
+                    }
+                    
+                    if !file.isDeleted {
+                        folderHasActiveFiles[firstPart] = true
+                    }
                 }
-                immediateFiles.append(file)
             }
         }
         
-        // Step 2: For each immediate folder, calculate its direct children count and latest timestamp
+        // Step 2: Build folderInfo without nested loops or blocking disk I/O
         var folderInfo: [String: (itemCount: Int, lastTimestamp: Date, isDeleted: Bool, versionCount: Int)] = [:]
-        
         for folderName in immediateFolderNames {
             let folderFullPath = basePrefix.isEmpty ? folderName : "\(basePrefix)/\(folderName)"
-            var subfolderNames = Set<String>()
-            var directFileCount = 0
-            var latestDate = Date.distantPast
+            let subs = folderSubfolders[folderName]?.count ?? 0
+            let directs = folderDirectCount[folderName] ?? 0
+            let totalChildren = subs + directs
+            let latestDate = folderLatestDate[folderName] ?? Date()
             
-            if currentFilter == .history {
-                // In history mode, count children based strictly on tracked files that are deleted
-                for file in trackedFiles {
-                    if file.logicalPath.hasPrefix(folderFullPath + "/") {
-                        let subRel = String(file.logicalPath.dropFirst(folderFullPath.count + 1))
-                        let subParts = subRel.split(separator: "/")
-                        if subParts.count == 1 {
-                            directFileCount += 1
-                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
-                        } else if subParts.count > 1 {
-                            subfolderNames.insert(String(subParts[0]))
-                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
-                        }
-                    }
-                }
-            } else {
-                for dirPath in knownDirectoryPaths {
-                    if dirPath.hasPrefix(folderFullPath + "/") {
-                        let subRel = String(dirPath.dropFirst(folderFullPath.count + 1))
-                        let subParts = subRel.split(separator: "/")
-                        if let firstSub = subParts.first {
-                            let subStr = String(firstSub)
-                            if !subStr.lowercased().hasSuffix(".app") {
-                                subfolderNames.insert(subStr)
-                            }
-                        }
-                    }
-                }
-                
-                var countedAppsInFolder = Set<String>()
-                for file in trackedFiles {
-                    if file.logicalPath.hasPrefix(folderFullPath + "/") {
-                        let subRel = String(file.logicalPath.dropFirst(folderFullPath.count + 1))
-                        let subParts = subRel.split(separator: "/")
-                        if let firstSub = subParts.first, String(firstSub).lowercased().hasSuffix(".app") {
-                            let appName = String(firstSub)
-                            if !countedAppsInFolder.contains(appName) {
-                                countedAppsInFolder.insert(appName)
-                                directFileCount += 1
-                                if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
-                            }
-                            continue
-                        }
-                        if subParts.count == 1 {
-                            directFileCount += 1
-                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
-                        } else if subParts.count > 1 {
-                            subfolderNames.insert(String(subParts[0]))
-                            if file.lastTimestamp > latestDate { latestDate = file.lastTimestamp }
-                        }
-                    }
-                }
-            }
-            
-            let totalChildren = subfolderNames.count + directFileCount
-            if latestDate == Date.distantPast { latestDate = Date() }
-            
-            let isDeleted = isFolderDeleted(folderFullPath: folderFullPath, syncEngine: syncEngine)
+            let hasActive = folderHasActiveFiles[folderName] ?? false
+            let isDeleted: Bool = {
+                if currentFilter == .history { return true }
+                if hasActive { return false }
+                return isFolderDeleted(folderFullPath: folderFullPath, syncEngine: syncEngine)
+            }()
             let verCount = max(1, syncEngine.database.versionCount(forFolder: folderFullPath))
             
             folderInfo[folderName] = (
@@ -1079,8 +1017,8 @@ public struct HistoryWindowView: View {
                         syncEngine: syncEngine,
                         libraryFilter: $vm.libraryFilter,
                         selectedSourceId: $vm.selectedSourceId,
-                        totalFileCount: vm.totalCount,
-                        activeCount: vm.activeCount,
+                        totalFileCount: max(vm.totalCount, syncEngine.diskStatus.totalFilesCount + vm.deletedCount),
+                        activeCount: max(vm.activeCount, syncEngine.diskStatus.totalFilesCount),
                         deletedCount: vm.deletedCount,
                         onAddSource: {
                             promptAddSource()
@@ -1101,7 +1039,11 @@ public struct HistoryWindowView: View {
                             vm.selectedFolder = nil
                             vm.selectedVersion = nil
                             vm.fileVersions = []
-                            vm.refreshFileList(syncEngine: syncEngine)
+                            if vm.trackedFiles.isEmpty {
+                                vm.refreshFileList(syncEngine: syncEngine)
+                            } else {
+                                vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                            }
                         }
                     )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
@@ -1126,8 +1068,8 @@ public struct HistoryWindowView: View {
                         syncEngine: syncEngine,
                         libraryFilter: $vm.libraryFilter,
                         selectedSourceId: $vm.selectedSourceId,
-                        totalFileCount: vm.totalCount,
-                        activeCount: vm.activeCount,
+                        totalFileCount: max(vm.totalCount, syncEngine.diskStatus.totalFilesCount + vm.deletedCount),
+                        activeCount: max(vm.activeCount, syncEngine.diskStatus.totalFilesCount),
                         deletedCount: vm.deletedCount,
                         onAddSource: {
                             promptAddSource()
@@ -1148,7 +1090,11 @@ public struct HistoryWindowView: View {
                             vm.selectedFolder = nil
                             vm.selectedVersion = nil
                             vm.fileVersions = []
-                            vm.refreshFileList(syncEngine: syncEngine)
+                            if vm.trackedFiles.isEmpty {
+                                vm.refreshFileList(syncEngine: syncEngine)
+                            } else {
+                                vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                            }
                         }
                     )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
@@ -1189,7 +1135,11 @@ public struct HistoryWindowView: View {
                                                     vm.selectedSourceId = matchingSource.id
                                                 }
                                             }
-                                            vm.refreshFileList(syncEngine: syncEngine)
+                                            if vm.trackedFiles.isEmpty {
+                                                vm.refreshFileList(syncEngine: syncEngine)
+                                            } else {
+                                                vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                                            }
                                         },
                                         onOpenFile: { file in
                                             vm.openFile(file, syncEngine: syncEngine)
@@ -1222,7 +1172,11 @@ public struct HistoryWindowView: View {
                                                     vm.selectedSourceId = matchingSource.id
                                                 }
                                             }
-                                            vm.refreshFileList(syncEngine: syncEngine)
+                                            if vm.trackedFiles.isEmpty {
+                                                vm.refreshFileList(syncEngine: syncEngine)
+                                            } else {
+                                                vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                                            }
                                         },
                                         onOpenFile: { file in
                                             vm.openFile(file, syncEngine: syncEngine)
@@ -1254,7 +1208,11 @@ public struct HistoryWindowView: View {
                                     } else {
                                         vm.selectedSourceId = nil
                                     }
-                                    vm.refreshFileList(syncEngine: syncEngine)
+                                    if vm.trackedFiles.isEmpty {
+                                        vm.refreshFileList(syncEngine: syncEngine)
+                                    } else {
+                                        vm.recomputeDisplayedItems(syncEngine: syncEngine)
+                                    }
                                 }
                             )
                         } else {
