@@ -17,37 +17,39 @@ public final class WindowManager: NSObject, ObservableObject, NSWindowDelegate {
         AppDelegate.applyAdaptiveIcon()
         syncEngine.activeViewMode = initialMode
         
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let targetWidth: CGFloat = min(1680, screen.width * 0.95)
+        let targetHeight: CGFloat = min(888, screen.height * 0.95)
+        
         if let window = historyWindow {
             if window.isMiniaturized {
                 window.deminiaturize(nil)
             }
+            window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
+            window.center()
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
             return
         }
         
         let contentView = HistoryWindowView(syncEngine: syncEngine)
+            .frame(minWidth: 960, idealWidth: targetWidth, minHeight: 580, idealHeight: targetHeight)
         let hostingController = NSHostingController(rootView: contentView)
-        
-        var initialWidth: CGFloat = 1680
-        var initialHeight: CGFloat = 888
-        if let screenFrame = NSScreen.main?.visibleFrame {
-            initialWidth = min(initialWidth, screenFrame.width * 0.95)
-            initialHeight = min(initialHeight, screenFrame.height * 0.95)
-        }
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         
         let window = NSWindow(
-            contentRect: NSRect(x: 120, y: 120, width: initialWidth, height: initialHeight),
+            contentRect: NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         
         window.title = "Sync Disk"
-        window.minSize = NSSize(width: 1080, height: 620)
+        window.minSize = NSSize(width: 960, height: 580)
         window.toolbarStyle = .unifiedCompact
         window.titleVisibility = .hidden
         window.contentViewController = hostingController
+        window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.delegate = self
