@@ -74,9 +74,9 @@ public final class DiskMonitor: @unchecked Sendable {
     private func startTimer() {
         timer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 1.0, repeating: 2.0)
+        t.schedule(deadline: .now() + 5.0, repeating: 5.0)
         t.setEventHandler { [weak self] in
-            self?.checkStatus()
+            self?.checkStatus(forceNotify: false)
         }
         self.timer = t
         t.resume()
@@ -91,7 +91,7 @@ public final class DiskMonitor: @unchecked Sendable {
         let path = url.standardizedFileURL.path
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-        let isWritable = FileManager.default.isWritableFile(atPath: path)
+        let isWritable = exists && FileManager.default.isWritableFile(atPath: path)
         let connected = exists && isWritable
         
         updateConnected(connected, forceNotify: forceNotify)

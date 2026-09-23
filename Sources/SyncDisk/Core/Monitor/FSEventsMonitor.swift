@@ -11,6 +11,7 @@ public final class FSEventsMonitor: @unchecked Sendable {
     private let pendingLock = NSLock()
     
     public var pathsToWatch: [String] = []
+    public var excludedPathPrefixes: [String] = []
     public var debounceInterval: TimeInterval = 1.0
     public var onChange: ChangeHandler?
     
@@ -20,9 +21,27 @@ public final class FSEventsMonitor: @unchecked Sendable {
         stop()
     }
     
-    public func start(paths: [String], debounce: TimeInterval = 1.0, onChange: @escaping ChangeHandler) {
+    public func isPathExcluded(_ path: String) -> Bool {
+        if path.contains("/.backup") || path.contains("/.staging_") {
+            return true
+        }
+        for prefix in excludedPathPrefixes {
+            if path.hasPrefix(prefix) {
+                return true
+            }
+        }
+        return false
+    }
+    
+    public func start(
+        paths: [String],
+        excludedPrefixes: [String] = [],
+        debounce: TimeInterval = 1.0,
+        onChange: @escaping ChangeHandler
+    ) {
         stop()
         self.pathsToWatch = paths.filter { FileManager.default.fileExists(atPath: $0) }
+        self.excludedPathPrefixes = excludedPrefixes
         self.debounceInterval = debounce
         self.onChange = onChange
         
@@ -53,6 +72,9 @@ public final class FSEventsMonitor: @unchecked Sendable {
             for path in paths {
                 let name = (path as NSString).lastPathComponent
                 if name.hasPrefix(".") || name == ".DS_Store" || name == ".localized" {
+                    continue
+                }
+                if monitor.isPathExcluded(path) {
                     continue
                 }
                 urls.append(URL(fileURLWithPath: path))

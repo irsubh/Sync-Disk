@@ -168,34 +168,41 @@ public final class HistoryDatabase: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.35, execute: work)
     }
     
+    private var isIndexLoaded = false
+    
     // MARK: - Filesystem Snapshot Scanner & Indexer
     
     public func reloadFromStorage() {
         queue.sync {
-            scanSnapshotsFromStorageLocked()
+            scanSnapshotsFromStorageLocked(force: false)
         }
     }
     
     public func reloadFromStorageIfNeeded() {
         queue.sync {
-            if versionsByPath.isEmpty {
-                scanSnapshotsFromStorageLocked()
+            if !isIndexLoaded || versionsByPath.isEmpty {
+                scanSnapshotsFromStorageLocked(force: false)
             }
         }
     }
     
     public func scanSnapshotsFromStorage() {
         queue.sync {
-            scanSnapshotsFromStorageLocked()
+            scanSnapshotsFromStorageLocked(force: true)
         }
     }
     
-    private func scanSnapshotsFromStorageLocked() {
+    private func scanSnapshotsFromStorageLocked(force: Bool = false) {
+        if !force && isIndexLoaded && !versionsByPath.isEmpty {
+            return
+        }
+        
         // 1. First check if persistent history_index.json already exists on storageBaseURL
         if let data = try? Data(contentsOf: indexFileURL),
            let decoded = try? JSONDecoder().decode([String: [FileHistoryEntry]].self, from: data),
            !decoded.isEmpty {
             self.versionsByPath = decoded
+            self.isIndexLoaded = true
             return
         }
         

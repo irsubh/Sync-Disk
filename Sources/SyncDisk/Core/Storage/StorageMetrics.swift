@@ -2,15 +2,27 @@ import Foundation
 
 public final class StorageMetrics: @unchecked Sendable {
     private let fileManager = FileManager.default
+    private var cachedSyncedSize: Int64 = 0
+    private var cachedHistorySize: Int64 = 0
+    private var lastFullScanDate: Date = Date.distantPast
+    private let metricsLock = NSLock()
     
     public init() {}
+    
+    public func updateCachedSizes(syncedDelta: Int64 = 0, historyDelta: Int64 = 0) {
+        metricsLock.lock()
+        cachedSyncedSize = max(0, cachedSyncedSize + syncedDelta)
+        cachedHistorySize = max(0, cachedHistorySize + historyDelta)
+        metricsLock.unlock()
+    }
     
     /// Computes full disk status including external volume space, folder sizes, and history growth metrics.
     public func calculateStatus(
         syncDestination: URL?,
         historyDestination: URL?,
         sources: [SyncSource] = [],
-        database: HistoryDatabase? = nil
+        database: HistoryDatabase? = nil,
+        forceDeepScan: Bool = false
     ) async -> DiskStatus {
         guard let dest = syncDestination else {
             return DiskStatus(
@@ -56,16 +68,40 @@ public final class StorageMetrics: @unchecked Sendable {
         let historyURL = historyDestination ?? dest.appendingPathComponent(".backup", isDirectory: true)
         
         var syncedSize: Int64 = 0
-        if !sources.isEmpty {
-            for source in sources where source.isEnabled {
-                let sourceDest = dest.appendingPathComponent(source.name, isDirectory: true)
-                syncedSize += await calculateDirectorySize(at: sourceDest, excludingSubdirectory: nil)
-            }
-        } else {
-            syncedSize = await calculateDirectorySize(at: dest, excludingSubdirectory: historyURL)
-        }
+        var historySize: Int64 = 0
+        let now = Date()
         
-        let historySize = await calculateDirectorySize(at: historyURL, excludingSubdirectory: nil)
+        let shouldDeepScan = forceDeepScan || (cachedSyncedSize == 0 && now.timeIntervalSince(lastFullScanDate) > 300)
+        
+        if shouldDeepScan {
+            if !sources.isEmpty {
+                for source in sources where source.isEnabled {
+                    let sourceDest = dest.appendingPathComponent(source.name, isDirectory: true)
+                    syncedSize += await calculateDirectorySize(at: sourceDest, excludingSubdirectory: nil)
+                }
+            } else {
+                syncedSize = await calculateDirectorySize(at: dest, excludingSubdirectory: historyURL)
+            }
+            historySize = await calculateDirectorySize(at: historyURL, excludingSubdirectory: nil)
+            
+            metricsLock.lock()
+            cachedSyncedSize = syncedSize
+            cachedHistorySize = historySize
+            lastFullScanDate = now
+            metricsLock.unlock()
+        } else {
+            metricsLock.lock()
+            syncedSize = cachedSyncedSize
+            historySize = cachedHistorySize
+            metricsLock.unlock()
+            
+            if syncedSize == 0, let db = database, let files = try? db.allTrackedFiles() {
+                syncedSize = files.reduce(0) { $0 + $1.fileSize }
+                metricsLock.lock()
+                cachedSyncedSize = syncedSize
+                metricsLock.unlock()
+            }
+        }
         
         let totalUsed = max(0, totalSpace - freeSpace)
         let syncDiskTotal = syncedSize + historySize

@@ -308,7 +308,7 @@ public final class HistoryWindowViewModel: ObservableObject {
     private var lastRevisionRefresh = Date.distantPast
     public func refreshFileListThrottled(syncEngine: SyncEngine) {
         let now = Date()
-        guard now.timeIntervalSince(lastRevisionRefresh) >= 0.75 else { return }
+        guard now.timeIntervalSince(lastRevisionRefresh) >= 4.0 else { return }
         lastRevisionRefresh = now
         refreshFileList(syncEngine: syncEngine)
     }

@@ -103,6 +103,7 @@ public final class WindowManager: NSObject, ObservableObject, NSWindowDelegate {
         if closedWindow == historyWindow {
             // Dismiss in-app sheet if open
             SyncEngine.shared.showSettingsSheet = false
+            self.historyWindow = nil
             // Switch activation policy to .accessory: removes app from Dock and hides running dot,
             // while keeping the menu bar extra and background sync running seamlessly.
             NSApplication.shared.setActivationPolicy(.accessory)

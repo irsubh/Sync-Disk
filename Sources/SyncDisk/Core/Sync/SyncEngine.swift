@@ -1,12 +1,25 @@
 import Foundation
 import Combine
 
+public enum SyncEngineState: String, Sendable {
+    case idle = "Idle"
+    case watching = "Watching"
+    case debouncing = "Debouncing"
+    case scanning = "Scanning"
+    case copying = "Copying"
+    case verifying = "Verifying"
+    case committing = "Committing"
+    case paused = "Paused"
+    case error = "Error"
+}
+
 public final class SyncEngine: ObservableObject, @unchecked Sendable {
     public static let shared = SyncEngine()
     
     @Published public var config: SyncConfig
     @Published public var diskStatus: DiskStatus = DiskStatus()
     @Published public var syncProgress: SyncProgress = SyncProgress()
+    @Published public var engineState: SyncEngineState = .idle
     @Published public var isEngineActive: Bool = false
     @Published public var historyRevision: Int = 0
     @Published public var lastErrorMessage: String?
@@ -26,7 +39,30 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     private let fileManager = FileManager.default
     private var isReconciling: Bool = false
     private var isQueuePaused: Bool = false
-    private var periodicReconcileTimer: DispatchSourceTimer?
+    
+    /// Tracks recently synchronized/evicted paths to prevent self-triggering FSEvent loops.
+    private var recentlyHandledPaths: [String: (date: Date, size: Int64, mtime: Date)] = [:]
+    private let handledPathsLock = NSLock()
+    
+    public func markPathHandled(logicalPath: String, size: Int64, mtime: Date) {
+        handledPathsLock.lock()
+        recentlyHandledPaths[logicalPath] = (date: Date(), size: size, mtime: mtime)
+        let threshold = Date().addingTimeInterval(-30)
+        recentlyHandledPaths = recentlyHandledPaths.filter { $0.value.date > threshold }
+        handledPathsLock.unlock()
+    }
+    
+    public func shouldIgnoreHandledEvent(logicalPath: String, currentSize: Int64, currentMtime: Date) -> Bool {
+        handledPathsLock.lock()
+        defer { handledPathsLock.unlock() }
+        guard let entry = recentlyHandledPaths[logicalPath] else { return false }
+        if Date().timeIntervalSince(entry.date) < 15.0 {
+            if entry.size == currentSize && abs(entry.mtime.timeIntervalSince(currentMtime)) < 2.0 {
+                return true
+            }
+        }
+        return false
+    }
     
     public init(config: SyncConfig? = nil, database: HistoryDatabase? = nil, autoStart: Bool = true) {
         let effectiveConfig = config ?? SyncConfig.load()
@@ -110,7 +146,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     public func start() {
         guard !isEngineActive else {
             diskMonitor.checkStatus(forceNotify: true)
-            refreshDiskStatus()
+            refreshDiskStatus(force: true)
             return
         }
         isEngineActive = true
@@ -121,20 +157,32 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         diskMonitor.start()
         
+        startFSEventsMonitor()
+        
+        refreshDiskStatus(force: true)
+        triggerReconcile()
+    }
+    
+    private func startFSEventsMonitor() {
         let activePaths = config.sources.filter { $0.isEnabled }.map { $0.url.path }
-        fsMonitor.start(paths: activePaths, debounce: config.debounceSeconds) { [weak self] changedURLs in
+        var excludedPrefixes: [String] = []
+        if let dest = config.syncDestination?.standardizedFileURL.path {
+            excludedPrefixes.append(dest)
+        }
+        if let hist = config.effectiveHistoryURL?.standardizedFileURL.path {
+            excludedPrefixes.append(hist)
+        }
+        fsMonitor.start(
+            paths: activePaths,
+            excludedPrefixes: excludedPrefixes,
+            debounce: max(0.5, config.debounceSeconds)
+        ) { [weak self] changedURLs in
             self?.handleFSEvents(changedURLs)
         }
-        
-        startPeriodicReconciliationTimer()
-        refreshDiskStatus()
-        triggerReconcile()
     }
     
     public func stop() {
         isEngineActive = false
-        periodicReconcileTimer?.cancel()
-        periodicReconcileTimer = nil
         fsMonitor.stop()
         diskMonitor.stop()
         diskMonitor.onStatusChange = nil
@@ -147,11 +195,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         diskMonitor.destinationURL = newConfig.syncDestination
         
         if isEngineActive {
-            let activePaths = newConfig.sources.filter { $0.isEnabled }.map { $0.url.path }
-            fsMonitor.start(paths: activePaths, debounce: newConfig.debounceSeconds) { [weak self] changedURLs in
-                self?.handleFSEvents(changedURLs)
-            }
-            refreshDiskStatus()
+            startFSEventsMonitor()
+            refreshDiskStatus(force: true)
             triggerReconcile()
         }
     }
@@ -171,20 +216,16 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
     }
     
-    private func startPeriodicReconciliationTimer() {
-        periodicReconcileTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: syncQueue)
-        timer.schedule(deadline: .now() + 60.0, repeating: 60.0)
-        timer.setEventHandler { [weak self] in
-            self?.triggerReconcile()
-        }
-        self.periodicReconcileTimer = timer
-        timer.resume()
-    }
-    
+    private var lastDiskStatusCalculation = Date.distantPast
     @MainActor private var isCalculatingDiskStatus = false
     
-    public func refreshDiskStatus() {
+    public func refreshDiskStatus(force: Bool = false) {
+        let now = Date()
+        if !force && now.timeIntervalSince(lastDiskStatusCalculation) < 10.0 {
+            return
+        }
+        lastDiskStatusCalculation = now
+        
         Task { @MainActor in
             guard !self.isCalculatingDiskStatus else { return }
             self.isCalculatingDiskStatus = true
@@ -194,7 +235,8 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 syncDestination: self.config.syncDestination,
                 historyDestination: self.config.effectiveHistoryURL,
                 sources: self.config.sources,
-                database: self.database
+                database: self.database,
+                forceDeepScan: force
             )
             self.diskStatus = status
         }
@@ -210,10 +252,19 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self, !self.isQueuePaused else { return }
             guard let destBase = self.config.syncDestination else { return }
+            let destPath = destBase.standardizedFileURL.path
+            let histPath = self.config.effectiveHistoryURL?.standardizedFileURL.path
             
             var itemsToSync: [PendingSyncItem] = []
             
             for url in urls {
+                let urlStd = url.standardizedFileURL.path
+                
+                // 1. Strict destination and backup path exclusions
+                if urlStd.hasPrefix(destPath) { continue }
+                if let hist = histPath, urlStd.hasPrefix(hist) { continue }
+                if urlStd.contains("/.backup") || urlStd.contains("/.staging_") { continue }
+                
                 let filename = url.lastPathComponent
                 if self.shouldIgnore(filename: filename) {
                     continue
@@ -233,6 +284,32 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                             try? self.fileManager.createDirectory(at: destFileURL, withIntermediateDirectories: true)
                         }
                     } else {
+                        // 2. Metadata-first check: Compare size & modDate
+                        let attrs = try? self.fileManager.attributesOfItem(atPath: url.path)
+                        let currentSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+                        let currentMtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                        
+                        // Check echo loop shield (recent writes/evictions by Sync Disk)
+                        if self.shouldIgnoreHandledEvent(logicalPath: logicalPath, currentSize: currentSize, currentMtime: currentMtime) {
+                            continue
+                        }
+                        
+                        // Check dataless iCloud item guard
+                        if self.iCloudManager.isDatalessICloudItem(at: url) {
+                            if let existing = try? self.database.latestVersion(for: logicalPath, sourceId: source.id), existing.fileSize > 0 {
+                                // Already recorded in history & mirror; dataless transition must not trigger download loop
+                                continue
+                            }
+                        }
+                        
+                        // Compare against latest recorded version in database
+                        if let latest = try? self.database.latestVersion(for: logicalPath, sourceId: source.id) {
+                            if latest.fileSize == currentSize && abs(latest.timestamp.timeIntervalSince(currentMtime)) < 2.0 {
+                                // Metadata is identical. No content change!
+                                continue
+                            }
+                        }
+                        
                         itemsToSync.append(PendingSyncItem(
                             sourceURL: url,
                             destinationURL: destFileURL,
@@ -246,7 +323,12 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             }
             
             if !itemsToSync.isEmpty {
-                let maxConcurrent = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+                await MainActor.run {
+                    self.engineState = .copying
+                    self.syncProgress.isSyncing = true
+                }
+                
+                let maxConcurrent = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount))
                 await withTaskGroup(of: Void.self) { group in
                     var inFlight = 0
                     for item in itemsToSync {
@@ -278,10 +360,17 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
                 
                 await MainActor.run {
                     self.historyRevision += 1
+                    self.engineState = .idle
+                    self.syncProgress.isSyncing = false
+                    self.syncProgress.statusDescription = "Idle — Everything up to date"
+                }
+            } else {
+                await MainActor.run {
+                    self.engineState = .idle
                 }
             }
             
-            self.refreshDiskStatus()
+            self.refreshDiskStatus(force: false)
         }
     }
     
@@ -329,7 +418,19 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         if destExists {
             let destAttrs = try fileManager.attributesOfItem(atPath: destinationURL.path)
+            let destSize = (destAttrs[.size] as? NSNumber)?.int64Value ?? 0
             let destModDate = (destAttrs[.modificationDate] as? Date) ?? now
+            
+            let srcAttrs = try fileManager.attributesOfItem(atPath: sourceURL.path)
+            let srcSize = (srcAttrs[.size] as? NSNumber)?.int64Value ?? 0
+            let srcModDate = (srcAttrs[.modificationDate] as? Date) ?? now
+            
+            // Fast path: If destination already matches source metadata, skip duplicate sync!
+            if destSize == srcSize && abs(destModDate.timeIntervalSince(srcModDate)) < 2.0 {
+                self.markPathHandled(logicalPath: logicalPath, size: srcSize, mtime: srcModDate)
+                try? database.updateJournalState(id: journalId, state: .committed)
+                return
+            }
             
             // Check if destination was manually edited externally (conflict protection)
             let destSHA = try? storageManager.computeSHA256(for: destinationURL)
@@ -411,9 +512,13 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
         // 7. Mark Journal operation as committed
         try database.updateJournalState(id: journalId, state: .committed)
         
+        self.markPathHandled(logicalPath: logicalPath, size: mirrorSize, mtime: now)
+        self.storageMetrics.updateCachedSizes(syncedDelta: mirrorSize, historyDelta: sourceSize)
+        
         // 8. Safe iCloud Eviction: ONLY after external backup is verified!
         if config.evictICloudAfterSync && (iCloudState == .downloaded || iCloudManager.isUbiquitousItem(at: sourceURL)) {
             var verificationState: ICloudSyncState = .verified
+            self.markPathHandled(logicalPath: logicalPath, size: mirrorSize, mtime: now)
             _ = try? iCloudManager.evictLocalCopyIfVerified(at: sourceURL, verificationState: &verificationState)
         }
         
@@ -607,7 +712,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
     // MARK: - Reconciliation Scan (Authoritative Source of Truth)
     
     public func triggerReconcile() {
-        diskMonitor.checkStatus(forceNotify: true)
+        diskMonitor.checkStatus(forceNotify: false)
         guard config.isSyncEnabled, diskMonitor.isConnected, !isReconciling else { return }
         self.isQueuePaused = false
         
@@ -616,6 +721,7 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             self.isReconciling = true
             
             await MainActor.run {
+                self.engineState = .scanning
                 self.syncProgress.isSyncing = true
                 self.syncProgress.statusDescription = "Reconciling changes..."
             }
@@ -623,11 +729,12 @@ public final class SyncEngine: ObservableObject, @unchecked Sendable {
             await self.reconcileAllSourcesInternal()
             
             await MainActor.run {
+                self.engineState = .idle
                 self.syncProgress.isSyncing = false
                 self.syncProgress.statusDescription = "Idle — Everything up to date"
                 self.isReconciling = false
             }
-            self.refreshDiskStatus()
+            self.refreshDiskStatus(force: false)
         }
     }
     
