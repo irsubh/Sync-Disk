@@ -9,6 +9,8 @@ public struct TrackedFileInfo: Identifiable, Hashable, Sendable {
     public let fileSize: Int64
     public let versionCount: Int
     public let isDeleted: Bool
+    /// True if at least one version record has a physical archive copy in .backup (historyRelativePath != "")
+    public let hasArchivedVersion: Bool
     
     public var filename: String { originalFilename }
     public var isCurrentDeleted: Bool { isDeleted }
@@ -20,7 +22,8 @@ public struct TrackedFileInfo: Identifiable, Hashable, Sendable {
         lastTimestamp: Date,
         fileSize: Int64,
         versionCount: Int,
-        isDeleted: Bool
+        isDeleted: Bool,
+        hasArchivedVersion: Bool = false
     ) {
         self.logicalPath = logicalPath
         self.originalFilename = originalFilename
@@ -29,6 +32,7 @@ public struct TrackedFileInfo: Identifiable, Hashable, Sendable {
         self.fileSize = fileSize
         self.versionCount = versionCount
         self.isDeleted = isDeleted
+        self.hasArchivedVersion = hasArchivedVersion
     }
 }
 
@@ -478,6 +482,20 @@ public final class HistoryDatabase: @unchecked Sendable {
         return try allTrackedFiles(query: nil, filter: filter)
     }
     
+    /// Count of unique logical paths that have at least one physically archived copy in .backup
+    /// (i.e. at least one version with a non-empty historyRelativePath starting with "snapshots/").
+    /// This is the correct value for the "History" sidebar count.
+    public func countPathsWithArchivedHistory() -> Int {
+        return queue.sync {
+            if versionsByPath.isEmpty {
+                scanSnapshotsFromStorageLocked()
+            }
+            return versionsByPath.values.filter { versions in
+                versions.contains(where: { !$0.historyRelativePath.isEmpty })
+            }.count
+        }
+    }
+    
     public func allTrackedFiles(query: String? = nil, filter: FileFilter = .all) throws -> [TrackedFileInfo] {
         return queue.sync {
             if versionsByPath.isEmpty {
@@ -516,6 +534,8 @@ public final class HistoryDatabase: @unchecked Sendable {
                     }
                 }
                 
+                let hasArchived = versions.contains(where: { !$0.historyRelativePath.isEmpty })
+                
                 let info = TrackedFileInfo(
                     logicalPath: logicalPath,
                     originalFilename: latest.originalFilename,
@@ -523,7 +543,8 @@ public final class HistoryDatabase: @unchecked Sendable {
                     lastTimestamp: latest.timestamp,
                     fileSize: latest.fileSize,
                     versionCount: versions.count,
-                    isDeleted: isDeleted
+                    isDeleted: isDeleted,
+                    hasArchivedVersion: hasArchived
                 )
                 result.append(info)
             }
