@@ -47,9 +47,9 @@ Designed specifically for macOS Sonoma and Sequoia, Sync Disk pairs seamless FSE
 
 Download the ready-to-run macOS app (no build tools required):
 
-- 📦 **[Download Sync Disk.app.zip](https://github.com/irsubh/Sync-Disk/raw/main/Sync%20Disk.app.zip)** *(~3.0 MB · Native macOS Sonoma & Sequoia)*
+- 📦 **[Download Sync-Disk.zip](https://github.com/irsubh/Sync-Disk/raw/main/Sync-Disk.zip)** *(~3.0 MB · Native macOS Sonoma & Sequoia)*
 
-1. Download and extract **`Sync Disk.app.zip`**
+1. Download and extract **`Sync-Disk.zip`**
 2. Move **`Sync Disk.app`** to your `/Applications` folder
 3. Launch **Sync Disk** from Launchpad, Spotlight, or Applications!
 

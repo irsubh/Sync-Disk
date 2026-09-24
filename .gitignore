@@ -10,6 +10,7 @@ _CodeSignature/
 *.app
 *.zip
 !Sync Disk.app.zip
+!Sync-Disk.zip
 *.o
 *.d
 *.dia
