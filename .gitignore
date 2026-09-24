@@ -9,6 +9,7 @@ _CodeSignature/
 *.app/
 *.app
 *.zip
+!Sync Disk.app.zip
 *.o
 *.d
 *.dia
