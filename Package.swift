@@ -10,10 +10,6 @@ let package = Package(
         .executable(
             name: "SyncDisk",
             targets: ["SyncDisk"]
-        ),
-        .executable(
-            name: "SyncDiskTestRunner",
-            targets: ["SyncDiskTestRunner"]
         )
     ],
     dependencies: [],
@@ -27,11 +23,6 @@ let package = Package(
             name: "SyncDisk",
             dependencies: ["SyncDiskCore"],
             path: "Sources/SyncDiskAppEntry"
-        ),
-        .executableTarget(
-            name: "SyncDiskTestRunner",
-            dependencies: ["SyncDiskCore"],
-            path: "Tests/SyncDiskTests"
         )
     ]
 )
