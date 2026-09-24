@@ -43,19 +43,7 @@ Designed specifically for macOS Sonoma and Sequoia, Sync Disk pairs seamless FSE
 
 ## 🚀 Installation
 
-### Option 1: Direct Download (.app)
-
-1. Clone or download this repository:
-   ```bash
-   git clone https://github.com/subhzed/Sync-Disk.git
-   ```
-2. Move `Sync Disk.app` (or extract `Sync Disk.app.zip`) into your `/Applications` folder:
-   ```bash
-   cp -R "Sync Disk.app" /Applications/
-   ```
-3. Open **Sync Disk** from `/Applications` or Spotlight.
-
-### Option 2: Build from Source
+### Installation & Build from Source
 
 #### Prerequisites
 - macOS 14.0 (Sonoma) or macOS 15.0+ (Sequoia)
@@ -65,14 +53,11 @@ Designed specifically for macOS Sonoma and Sequoia, Sync Disk pairs seamless FSE
 #### Building
 ```bash
 # Clone the repository
-git clone https://github.com/subhzed/Sync-Disk.git
+git clone https://github.com/irsubh/Sync-Disk.git
 cd Sync-Disk
 
 # Build Release Binary
 swift build -c release --product SyncDisk
-
-# Run Test Suite
-.build/debug/SyncDiskTestRunner
 ```
 
 ---
@@ -81,21 +66,21 @@ swift build -c release --product SyncDisk
 
 ```
 SyncDisk/
-├── Sources/
-│   ├── SyncDisk/
-│   │   ├── Core/
-│   │   │   ├── Sync/        # SyncEngine, FSEventsWatcher, StorageManager, ICloudManager
-│   │   │   ├── Database/    # HistoryDatabase (File-based, zero-SQLite)
-│   │   │   ├── Models/      # SyncConfig, FileHistoryEntry, SnapshotManifest
-│   │   │   └── Storage/     # StorageMetrics, RenameDetector
-│   │   ├── UI/
-│   │   │   ├── History/     # HistoryWindowView, FileGridIconView, HistoricalInspectorView
-│   │   │   ├── Components/  # ThumbnailCache, PathBarView, EmptyStateView
-│   │   │   ├── MenuBar/     # MenuBarPopupView, MenuBarIconProvider
-│   │   │   └── Settings/    # SettingsView, OnboardingWindowView
-│   │   └── App/             # SyncDiskApp, AppDelegate, WindowManager
-└── Tests/
-    └── SyncDiskTests/       # 18 Automated Unit & Safety Verification Tests
+└── Sources/
+    ├── SyncDisk/
+    │   ├── Core/
+    │   │   ├── Sync/        # SyncEngine, FSEventsWatcher, StorageManager, ICloudManager
+    │   │   ├── Database/    # HistoryDatabase (File-based, zero-SQLite)
+    │   │   ├── Models/      # SyncConfig, FileHistoryEntry, SnapshotManifest
+    │   │   └── Storage/     # StorageMetrics, RenameDetector
+    │   ├── UI/
+    │   │   ├── History/     # HistoryWindowView, FileGridIconView, HistoricalInspectorView
+    │   │   ├── Components/  # ThumbnailCache, PathBarView, EmptyStateView
+    │   │   ├── MenuBar/     # MenuBarPopupView, MenuBarIconProvider
+    │   │   └── Settings/    # SettingsView, OnboardingWindowView
+    │   └── App/             # SyncDiskApp, AppDelegate, WindowManager
+    └── SyncDiskAppEntry/
+        └── main.swift       # Application entry point
 ```
 
 ---
